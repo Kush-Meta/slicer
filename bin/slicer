@@ -1,0 +1,4 @@
+#!/bin/sh
+# Slicer launcher - uses the project venv so no global installs are needed.
+here=$(cd "$(dirname "$0")/.." && pwd)
+exec "$here/.venv/bin/python" -m slicer.cli "$@"
