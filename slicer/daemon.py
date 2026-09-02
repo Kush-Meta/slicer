@@ -41,6 +41,9 @@ from .narrator import Narrator
 # How long a UI call may block the socket thread before we give up on it.
 MAIN_THREAD_TIMEOUT = 180.0
 
+# NSEventMaskAny: every event type.
+NSEventMaskAny = 0xFFFFFFFFFFFFFFFF
+
 
 @dataclass
 class _Work:
@@ -90,7 +93,9 @@ class Daemon:
         self._start_server()
         self._install_hotkey()
 
-        from Foundation import NSDate, NSRunLoop
+        from AppKit import NSApplication          # noqa: PLC0415
+        from Foundation import NSDate, NSRunLoop   # noqa: PLC0415
+        app = NSApplication.sharedApplication()
         loop = NSRunLoop.currentRunLoop()
         self._log(f"slicer daemon ready  (pid {os.getpid()})")
         self._log(f"  socket {ipc.SOCKET_PATH}")
@@ -99,8 +104,20 @@ class Daemon:
         try:
             while self.running:
                 self._drain_main_queue()
+                # Pump the *application* event queue, not just the run loop.
+                # Carbon hotkeys are dispatched by HIToolbox from inside
+                # ReceiveNextEvent, which NSApplication reaches through
+                # nextEventMatchingMask. CFRunLoop alone never dispatches them,
+                # so the handler registers successfully and is never called -
+                # which is exactly the symptom this fixes.
+                event = app.nextEventMatchingMask_untilDate_inMode_dequeue_(
+                    NSEventMaskAny, NSDate.dateWithTimeIntervalSinceNow_(0.02),
+                    "kCFRunLoopDefaultMode", True,
+                )
+                if event is not None:
+                    app.sendEvent_(event)
                 loop.runMode_beforeDate_(
-                    "kCFRunLoopDefaultMode", NSDate.dateWithTimeIntervalSinceNow_(0.02)
+                    "kCFRunLoopDefaultMode", NSDate.dateWithTimeIntervalSinceNow_(0.005)
                 )
         except KeyboardInterrupt:
             pass
@@ -142,6 +159,9 @@ class Daemon:
             )
             app = NSApplication.sharedApplication()
             app.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
+            # Without finishLaunching the application never starts servicing its
+            # event queue, so nothing is ever there to pump.
+            app.finishLaunching()
         except Exception as exc:          # noqa: BLE001
             self._log(f"  could not register with the window server: {exc}")
 
