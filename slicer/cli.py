@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
+import time
 import termios
 import threading
 import tty
@@ -43,6 +45,8 @@ def main(argv: list[str] | None = None) -> int:
     daemon_parser.add_argument("--rate", type=int)
     daemon_parser.add_argument("--no-highlight", action="store_true",
                                help="do not draw the on-screen highlight")
+    daemon_parser.add_argument("--background", action="store_true",
+                               help="detach and log to ~/.slicer/daemon.log")
 
     sub.add_parser("status", help="is a daemon running?")
     sub.add_parser("stop", help="shut down the running daemon")
@@ -53,6 +57,8 @@ def main(argv: list[str] | None = None) -> int:
         from .doctor import run as run_doctor
         return run_doctor()
     if args.command == "daemon":
+        if args.background:
+            return _start_background(args)
         from .daemon import Daemon
         return Daemon(voice=args.voice, rate=args.rate,
                       highlight=not args.no_highlight).run()
@@ -182,6 +188,43 @@ def _via_daemon(args) -> int | None:
     return 1 if failed else 0
 
 
+def _start_background(args) -> int:
+    """Re-exec the daemon detached, logging to a file.
+
+    Re-exec rather than fork: forking a process that has initialised AppKit is
+    not safe, and the daemon initialises it immediately.
+    """
+    import subprocess  # noqa: PLC0415
+    from . import ipc  # noqa: PLC0415
+
+    if ipc.is_running():
+        print(f"{DIM}a daemon is already running{RESET}")
+        return 0
+
+    ipc.ensure_runtime_dir()
+    log_path = os.path.join(ipc.RUNTIME_DIR, "daemon.log")
+    command = [sys.executable, "-m", "slicer.cli", "daemon"]
+    if args.voice:
+        command += ["--voice", args.voice]
+    if args.rate:
+        command += ["--rate", str(args.rate)]
+    if args.no_highlight:
+        command.append("--no-highlight")
+
+    with open(log_path, "a") as log:
+        subprocess.Popen(command, stdout=log, stderr=log, start_new_session=True,
+                         cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+    for _ in range(60):
+        if ipc.is_running():
+            print(f"{BOLD}daemon started{RESET}  {DIM}log: {log_path}{RESET}")
+            return 0
+        time.sleep(0.5)
+    print(f"{RED}slicer:{RESET} the daemon did not come up. See {log_path}",
+          file=sys.stderr)
+    return 1
+
+
 def _status() -> int:
     from . import ipc  # noqa: PLC0415
     stream = ipc.request({"method": "ping"})
@@ -190,8 +233,15 @@ def _status() -> int:
               f"start one with: ./bin/slicer daemon")
         return 1
     for message in stream:
+        hotkey = message.get("hotkey")
         print(f"{BOLD}daemon running{RESET}  pid {message.get('pid')}  "
               f"up {message.get('uptime')}s  {message.get('readings')} readings")
+        if hotkey:
+            print(f"  hotkey {CYAN}{hotkey}{RESET}  "
+                  f"{DIM}pressed {message.get('hotkey_presses', 0)} time(s) "
+                  f"since start{RESET}")
+        else:
+            print(f"  {YELLOW}no hotkey registered{RESET}")
         return 0
     return 1
 

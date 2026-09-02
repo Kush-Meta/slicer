@@ -68,6 +68,8 @@ class Daemon:
         self.highlight = highlight
         self.started = time.time()
         self.readings = 0
+        self.hotkey: str | None = None
+        self.hotkey_presses = 0
         self.main_queue: queue.Queue[_Work] = queue.Queue()
         self.running = True
         self._server: socket.socket | None = None
@@ -83,13 +85,16 @@ class Daemon:
             return 1
         ipc.clear_stale_socket()
 
+        self._become_accessory_app()
         self._warm_up()
         self._start_server()
         self._install_hotkey()
 
         from Foundation import NSDate, NSRunLoop
         loop = NSRunLoop.currentRunLoop()
-        print(f"slicer daemon ready  (pid {os.getpid()}, socket {ipc.SOCKET_PATH})")
+        self._log(f"slicer daemon ready  (pid {os.getpid()})")
+        self._log(f"  socket {ipc.SOCKET_PATH}")
+        self._log("  press the hotkey from any app; ctrl-C here to stop")
 
         try:
             while self.running:
@@ -123,6 +128,26 @@ class Daemon:
             raise work.error
         return work.result
 
+    def _become_accessory_app(self) -> None:
+        """Register with the window server, without a Dock icon.
+
+        Carbon hotkey delivery is unreliable from a process the window server
+        does not know about, and the picker needs an NSApplication anyway. An
+        accessory policy means no Dock icon and no menu bar - the same thing a
+        status-bar app does with LSUIElement.
+        """
+        try:
+            from AppKit import (  # noqa: PLC0415
+                NSApplication, NSApplicationActivationPolicyAccessory,
+            )
+            app = NSApplication.sharedApplication()
+            app.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
+        except Exception as exc:          # noqa: BLE001
+            self._log(f"  could not register with the window server: {exc}")
+
+    def _log(self, message: str) -> None:
+        print(message, flush=True)
+
     def _warm_up(self) -> None:
         """Load Vision now, so the first real reading is a warm one."""
         started = time.perf_counter()
@@ -141,7 +166,7 @@ class Daemon:
                 os.unlink(path)
             except OSError:
                 pass
-        print(f"  vision warmed in {(time.perf_counter() - started) * 1000:.0f}ms")
+        self._log(f"  vision warmed in {(time.perf_counter() - started) * 1000:.0f}ms")
 
     # -- socket thread -----------------------------------------------------
 
@@ -183,6 +208,8 @@ class Daemon:
                     "ok": True, "pid": os.getpid(),
                     "uptime": round(time.time() - self.started, 1),
                     "readings": self.readings,
+                    "hotkey": self.hotkey,
+                    "hotkey_presses": self.hotkey_presses,
                 })
             elif method == "shutdown":
                 ipc.send_line(client, {"ok": True})
@@ -287,12 +314,19 @@ class Daemon:
         try:
             from .hotkey import register_read_hotkey  # noqa: PLC0415
             description = register_read_hotkey(self._hotkey_pressed)
-            print(f"  hotkey {description} reads a region")
+            self.hotkey = description
+            self._log(f"  hotkey {description} reads a region")
         except Exception as exc:          # noqa: BLE001
-            print(f"  hotkey unavailable: {exc}")
+            self.hotkey = None
+            self._log(f"  hotkey unavailable: {exc}")
 
     def _hotkey_pressed(self) -> None:
-        """Fired on the main thread by the Carbon handler."""
+        """Fired on the main thread by the Carbon handler.
+
+        Must return immediately - it runs inside the Carbon event dispatcher.
+        """
+        self.hotkey_presses += 1
+        self._log(f"  hotkey pressed ({self.hotkey_presses}) - drag a region")
         threading.Thread(target=self._hotkey_reading, daemon=True).start()
 
     def _hotkey_reading(self) -> None:
