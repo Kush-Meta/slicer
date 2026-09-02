@@ -35,6 +35,8 @@ def main(argv: list[str] | None = None) -> int:
         p.add_argument("--fast", action="store_true", help="faster, less accurate recognition")
         p.add_argument("--show-skipped", action="store_true", help="list what was not read")
         p.add_argument("--timings", action="store_true", help="print the stage breakdown")
+        p.add_argument("--follow", action="store_true",
+                       help="keep reading as the content scrolls")
 
     sub.add_parser("doctor", help="check this machine and measure the latency budget")
 
@@ -87,7 +89,21 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  {prefix} {progress.utterance.spoken}")
 
     try:
-        conductor.read(source, on_progress=on_progress)
+        if args.follow:
+            from .continuity import accessibility_granted  # noqa: PLC0415
+            if not accessibility_granted():
+                print(f"  {YELLOW}note{RESET} automatic scrolling needs Accessibility "
+                      f"permission.\n       {DIM}System Settings > Privacy & Security > "
+                      f"Accessibility. Until then, scroll\n       yourself and Slicer will "
+                      f"pick up where it left off.{RESET}\n")
+            reading = conductor.read_continuous(
+                source, on_progress=on_progress,
+                on_advance=lambda n: print(f"  {DIM}--- screen {n} ---{RESET}"),
+            )
+            for note in reading.notes:
+                print(f"  {YELLOW}note{RESET} {note}")
+        else:
+            conductor.read(source, on_progress=on_progress)
     except KeyboardInterrupt:
         conductor.narrator.stop()
         print(f"\n{DIM}stopped{RESET}")

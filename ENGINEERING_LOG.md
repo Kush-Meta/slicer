@@ -417,19 +417,122 @@ only because the corpus included pages laid out by a real browser.
 
 ---
 
-## 8. Open items
+## 8. Phase two: picker, continuity, and content protection
+
+### 8.1 macOS 15 does honour window content protection
+
+The question deferred three times is answered. `scripts/verify_content_protection.py`
+shows an ordinary window in a capture (the control), then shows a window with
+`sharingType = NSWindowSharingNone` and captures again. On macOS 15.3.1 the
+protected window is **excluded** - the capture contains what was behind it.
+
+*Consequence.* The OS flag is real on this version, so Slicer's own application
+denylist is defence in depth rather than the only line. The script exists so
+this is re-checked on every major release instead of assumed.
+
+### 8.2 Slicer owns the region picker
+
+`screencapture -i` gives a good selection experience and then refuses to say
+which rectangle was chosen. That one missing fact blocks re-capture after a
+scroll, on-screen highlighting, and saved regions - so the picker is now ours:
+a dimmed overlay per display, drag to select, Escape to cancel, and the
+overlay sets `sharingType` none so it never appears in our own captures.
+
+The difficulty is coordinates. AppKit places windows in a global space whose
+origin is the bottom-left of the main display with y increasing upward;
+`screencapture -R` wants top-left with y increasing downward. The conversion
+lives in `picker.to_capture_space` so no caller has to know, and it is tested
+at both extremes.
+
+Dragging is driven directly in tests rather than through synthesized events, so
+the suite needs no Accessibility permission. What that cannot cover is whether
+the overlay *looks* right, which needs eyes.
+
+### 8.3 Word trigrams could not survive OCR errors
+
+*Symptom.* A paragraph with two recognition errors failed to match its clean
+self, so a scroll would have re-read it.
+
+*Root cause.* Fingerprints were word trigrams. One misread word destroys three
+of them, and recognition errors are guaranteed in real use.
+
+*Fix.* Character 5-grams over normalized tokens. Measured on the corpus:
+
+| comparison | word-3 | char-5 |
+|---|---|---|
+| same text, 2 OCR errors | 0.50 | 0.89 |
+| same text, 3 OCR errors | 0.50 | 0.84 |
+| clipped half-paragraph | 1.00 | 1.00 |
+| different paragraph | 0.00 | 0.04 |
+| sticky header vs body | 0.00 | 0.13 |
+
+True matches land at 0.84 and above, false ones at 0.13 and below. The 0.55
+threshold sits in a very wide gap, which is what makes it safe to leave alone.
+
+Similarity is Jaccard **or** containment, whichever is higher: a paragraph
+clipped by the top of the viewport shares all its grams with the full version
+but only half the union, and plain Jaccard would call it a different block.
+
+### 8.4 Block-level fingerprints broke on regrouping
+
+*Symptom.* Reading a tall page stopped three paragraphs early, reporting
+"the content changed on screen" - a false positive from the watchdog.
+
+*Root cause.* Fingerprints were per block, and **block boundaries are not
+stable across captures**. Paragraph grouping depends on what else is visible,
+so scrolling merges two blocks into one or splits one into two. The new blocks
+then matched nothing, overlap fell to zero, and the watchdog concluded the
+screen had changed.
+
+*Fix.* Fingerprint **lines**, not blocks. A line is the same line regardless of
+what surrounds it. A block counts as read once 60% of its lines have been.
+
+*Note.* This is the second time a stable-looking intermediate representation
+turned out to depend on viewport state. Anything derived from grouping is
+suspect across captures; only line-level facts survive.
+
+### 8.5 A unit test depended on what was on screen
+
+`test_a_capture_remembers_where_it_came_from` captured the top-left of the live
+screen. It passed alone and failed intermittently under the runner: if that
+area happens to be uniform, the capture validity check correctly rejects it.
+Rewritten to construct the object directly. The live capture path belongs in
+`doctor`, where nondeterminism is acceptable, not in a suite that must be
+trusted.
+
+### 8.6 Continuity, and how it is tested
+
+`read_continuous` reads a screenful, scrolls, re-captures, and resumes after the
+last familiar block - last rather than first, so a sticky header repeated at
+the top of every screen does not rewind the reading. It stops, always with a
+stated reason, when the content stops advancing, when the watchdog fires, or
+when the screen budget runs out.
+
+Scrolling posts scroll wheel events, which macOS gates behind Accessibility
+permission. Without it Slicer does not fail: it says so and follows the reader's
+own scrolling instead. That is also the better interaction in one respect - the
+pre-mortem lists "user scrolls while it reads" as a common failure, and a reader
+that follows the viewport cannot hit it.
+
+Tests simulate scrolling by cropping successive overlapping windows out of one
+tall rendered page, which is exactly what a scroll looks like to the pipeline.
+That makes the two failures that matter deterministic: a paragraph read twice,
+and a paragraph never read at all.
+
+---
+
+## 9. Open items
 
 Ordered by what blocks what.
 
-1. **Verify window content protection on macOS 15.** Mark a window protected,
-   capture the screen, inspect the result. Fifteen minutes, and it decides
-   whether OS-level exclusion is a defence or a decoration.
-2. **Continuity.** One capture only. Reading past the fold needs scroll,
-   re-capture, and shingle-fingerprint alignment. The largest missing piece.
-3. **Accessibility tree ahead of the deep lane.** Cheapest accuracy win
-   available; the one system doing this at scale reaches for it first.
-4. **Move speech in-process** to `AVSpeechSynthesizer`, removing the ~145 ms
+1. **Resident daemon.** Recognition is 484 ms cold and 33 ms warm; a
+   long-running process pays that once. The single largest perceived-speed win.
+2. **On-screen highlight** following the reading, now that the picker returns
+   real coordinates. The most convincing thing to show someone.
+3. **Move speech in-process** to `AVSpeechSynthesizer`, removing the ~145 ms
    spawn cost and enabling mid-utterance resume and word-timing callbacks.
-5. **Interactive capture coordinates.** `screencapture -i` does not report the
-   chosen rectangle, so blocks cannot be mapped back to the display.
+4. **Verify continuity against a real scrolling application**, not only the
+   cropped-page simulation. Momentum scrolling may overshoot.
+5. **Accessibility tree ahead of the deep lane.** Cheapest accuracy win
+   available; the one system doing this at scale reaches for it first.
 6. **Non-Latin scripts** in the golden set before claiming multilingual support.

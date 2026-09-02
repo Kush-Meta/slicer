@@ -12,7 +12,9 @@ and no models.
 ./bin/slicer doctor                    # check this machine, measure the budget
 ./bin/slicer plan --file page.png      # show what would be read, silently
 ./bin/slicer read                      # drag a region, then listen
+./bin/slicer read --follow             # keep reading as the content scrolls
 ./bin/slicer read --region 0,0,900,600 --timings
+./.venv/bin/python scripts/verify_content_protection.py
 ```
 
 During a reading: `space` pause · `n` next block · `p` previous · `q` quit.
@@ -67,6 +69,9 @@ slicer/
   capture.py          screen capture + uniform-frame and stability checks
   ocr.py              Apple Vision recognition, boxes flipped to top-left
   layout.py           XY-cut ordering, paragraph grouping, classification
+  picker.py           the region picker, and the coordinates it returns
+  fingerprint.py      character 5-gram line fingerprints for continuity
+  continuity.py       scrolling, and where to resume afterwards
   editor.py           speakable text + assert_grounded
   narrator.py         speech, transport, epoch cancellation
   conductor.py        the state machine and degradation ladder
@@ -79,6 +84,9 @@ tests/
   test_slicer.py      model, layout, editor and capture
   test_narrator.py    epochs, transport, cancellation
   test_conductor.py   pipeline error paths
+  test_picker.py      coordinate conversion and selection
+  test_fingerprint.py OCR-tolerant matching
+  test_continuity.py  reading past the fold, via simulated scroll
   test_golden.py      the WebKit corpus
   run_all.py          runs every suite; no external test runner needed
 ```
@@ -103,9 +111,6 @@ comfortable rather than tight.
 
 Named honestly rather than left to be discovered:
 
-- **Continuity.** One capture only. Reading past the fold needs scroll,
-  re-capture, and shingle-fingerprint alignment to avoid duplicated or skipped
-  paragraphs. This is the largest missing piece.
 - **The deep lane.** No Docling, no vision model. XY-cut handles columns well
   and will struggle on dense application chrome.
 - **Accessibility tree.** Should come before the deep lane — it is the cheapest

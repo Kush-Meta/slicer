@@ -15,8 +15,10 @@ from dataclasses import dataclass, field
 
 from . import capture as capture_mod
 from . import telemetry
-from .blocks import Slice
+from .blocks import Block, Slice
 from .capture import Capture, CaptureError
+from .continuity import Scroller
+from .fingerprint import ReadingMemory
 from .editor import UngroundedSpeech, Utterance, to_speech
 from .layout import LayoutConfig, build_slice
 from .narrator import Narrator
@@ -126,6 +128,95 @@ class Conductor:
             "notes": reading.notes,
         })
         return reading
+
+
+    # -- reading past the fold --------------------------------------------
+
+    def read_continuous(self, source: Capture, *, on_progress=None,
+                        on_advance=None, scroller_factory=None) -> Reading:
+        """Read the region, then keep going as the content scrolls.
+
+        Every spoken block is remembered by fingerprint, so a screenful that
+        overlaps the previous one resumes at the first unread block instead of
+        repeating it. Reading stops - and always says why - when the content
+        stops advancing, when the screen changes to something unrelated, or
+        when the screen budget runs out.
+        """
+        memory = ReadingMemory()
+        scroller = (scroller_factory or Scroller)(source)
+        current = self.prepare(source)
+        epoch = self.narrator.new_epoch()
+
+        notes: list[str] = list(current.notes)
+        timings = current.timings
+        spoken: list[Utterance] = []
+
+        while True:
+            spoken.extend(self._speak_unread(current, memory, epoch, on_progress))
+            if epoch != self.narrator.epoch:
+                notes.append("reading was superseded")
+                break
+
+            advance = scroller.advance()
+            if not advance.ok:
+                notes.append(advance.reason)
+                break
+
+            try:
+                nxt = self.prepare(advance.capture)
+            except CaptureError as exc:
+                notes.append(f"stopped: {exc}")
+                break
+
+            blocks = nxt.slice.readable()
+            if memory.content_changed(blocks):
+                # The screen is showing something else. Reading on would
+                # narrate unrelated text in a confident voice.
+                notes.append("stopped: the content changed on screen")
+                break
+            if memory.resume_index(blocks) >= len(blocks):
+                notes.append("reached the end of the content")
+                break
+
+            for note in nxt.notes:
+                if note not in notes:
+                    notes.append(note)
+            current = nxt
+            if on_advance:
+                on_advance(scroller.screens)
+
+        telemetry.record({
+            "event": "continuous_reading",
+            "screens": scroller.screens,
+            "blocks_spoken": len(memory),
+            "notes": notes,
+        })
+        return Reading(slice=current.slice, utterances=spoken,
+                       timings=timings, notes=notes)
+
+    def _speak_unread(self, reading: Reading, memory: ReadingMemory, epoch: int,
+                      on_progress) -> list[Utterance]:
+        """Speak whatever on this screenful has not been read yet.
+
+        The resume point is the block *after* the last one recognized, not the
+        first unrecognized one, so a sticky header repeated at the top of every
+        screen does not send the reading back to the start.
+        """
+        readable = reading.slice.readable()
+        start = memory.resume_index(readable)
+        remaining = {block.id for block in readable[start:]}
+        pending = [u for u in reading.utterances if u.block_id in remaining]
+        if not pending:
+            return []
+
+        by_id = {block.id: block for block in reading.slice.blocks}
+        spoken: list[Utterance] = []
+        for progress in self.narrator.read(pending, epoch):
+            if on_progress:
+                on_progress(progress)
+            memory.remember(by_id[progress.utterance.block_id])
+            spoken.append(progress.utterance)
+        return spoken
 
 
 def capture_for(region: str | None, file: str | None) -> Capture:

@@ -40,11 +40,21 @@ class Capture:
     path: str
     width: int          # pixels
     height: int         # pixels
-    origin_x: int = 0   # screen points; 0 when unknown (interactive capture)
+    origin_x: int = 0   # screen points
     origin_y: int = 0
     scale: float = 1.0
     origin_known: bool = True
     stable: bool = True
+    # The rectangle this came from, in screencapture space. Present whenever
+    # the origin is known, so the same region can be captured again after a
+    # scroll and blocks can be mapped back onto the display.
+    region: tuple[int, int, int, int] | None = None
+
+    def recapture(self) -> "Capture":
+        """Capture the same rectangle again."""
+        if self.region is None:
+            raise CaptureError("this capture did not record where it came from")
+        return capture_region(*self.region)
 
 
 def capture_region(x: int, y: int, w: int, h: int, *, stability_check: bool = True) -> Capture:
@@ -64,23 +74,23 @@ def capture_region(x: int, y: int, w: int, h: int, *, stability_check: bool = Tr
     return Capture(
         path=path, width=width, height=height,
         origin_x=x, origin_y=y, scale=scale, origin_known=True, stable=stable,
+        region=(x, y, w, h),
     )
 
 
 def capture_interactive() -> Capture:
-    """Let the user drag a region or click a window.
+    """Let the user drag a region, and remember exactly which one.
 
-    screencapture does not report which rectangle was chosen, so the screen
-    origin is unknown. That only matters for mapping blocks back onto the
-    display for highlighting, which v0 does not do.
+    Uses Slicer's own picker rather than `screencapture -i`, because the system
+    picker will not say which rectangle was chosen - and without that there is
+    no re-capture after a scroll and no highlighting.
     """
-    path = _run_screencapture(["-i", "-o"], allow_cancel=True)
-    width, height = _image_size(path)
-    _assert_has_content(path)
-    return Capture(
-        path=path, width=width, height=height,
-        scale=_main_display_scale(), origin_known=False, stable=True,
-    )
+    from .picker import select_region  # noqa: PLC0415
+
+    region = select_region()
+    if region is None:
+        raise CaptureError("selection cancelled")
+    return capture_region(region.x, region.y, region.w, region.h)
 
 
 def capture_file(path: str) -> Capture:

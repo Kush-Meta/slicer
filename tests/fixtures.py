@@ -91,3 +91,35 @@ def sidebar_and_body(nav: list[str], body: list[str], *, width: int = 1000,
     placed = [Placed(t, 30, 70 + i * 40, 17) for i, t in enumerate(nav)]
     placed += [Placed(t, 300, 70 + i * 34, size) for i, t in enumerate(body)]
     return render(placed, width=width, **kw), list(body)
+
+
+def crop(path: str, x: int, y: int, w: int, h: int) -> str:
+    """Crop a PNG. Used to simulate scrolling over a tall page."""
+    import Quartz
+    from Foundation import NSURL
+
+    source = Quartz.CGImageSourceCreateWithURL(NSURL.fileURLWithPath_(path), None)
+    image = Quartz.CGImageCreateWithImageInRect(
+        Quartz.CGImageSourceCreateImageAtIndex(source, 0, None),
+        Quartz.CGRectMake(x, y, w, h),
+    )
+    fd, out = tempfile.mkstemp(prefix="slicer-crop-", suffix=".png")
+    os.close(fd)
+    destination = Quartz.CGImageDestinationCreateWithURL(
+        NSURL.fileURLWithPath_(out), "public.png", 1, None
+    )
+    Quartz.CGImageDestinationAddImage(destination, image, None)
+    Quartz.CGImageDestinationFinalize(destination)
+    return out
+
+
+def tall_page(paragraphs: list[str], *, width: int = 900, leading: int = 56,
+              top: int = 40, size: int = 20) -> tuple[str, int]:
+    """A page taller than any one viewport, for continuity tests.
+
+    Leading is deliberately wider than the line height so paragraphs come out
+    as separate blocks, the way real body text does.
+    """
+    placed = [Placed(t, 60, top + i * leading, size) for i, t in enumerate(paragraphs)]
+    height = top + len(paragraphs) * leading + 40
+    return render(placed, width=width, height=height), height
