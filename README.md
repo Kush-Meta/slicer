@@ -9,6 +9,8 @@ normalization, and playback all run end to end on macOS with no cloud calls
 and no models.
 
 ```bash
+./bin/slicer daemon                    # resident process: 3.3x faster, plus a hotkey
+./bin/slicer status                    # is one running?
 ./bin/slicer doctor                    # check this machine, measure the budget
 ./bin/slicer plan --file page.png      # show what would be read, silently
 ./bin/slicer read                      # drag a region, then listen
@@ -18,6 +20,8 @@ and no models.
 ```
 
 During a reading: `space` pause · `n` next block · `p` previous · `q` quit.
+With the daemon running, **cmd-ctrl-R** reads a region from anywhere, and a
+highlight follows the block being spoken.
 
 ## What makes this different from the other read-aloud tools
 
@@ -72,6 +76,10 @@ slicer/
   picker.py           the region picker, and the coordinates it returns
   fingerprint.py      character 5-gram line fingerprints for continuity
   continuity.py       scrolling, and where to resume afterwards
+  daemon.py           the resident process; AppKit on main, sockets off it
+  ipc.py              newline-JSON over a Unix socket
+  hotkey.py           one global hotkey, via Carbon rather than an event tap
+  overlay.py          the highlight that follows the reading
   editor.py           speakable text + assert_grounded
   narrator.py         speech, transport, epoch cancellation
   conductor.py        the state machine and degradation ladder
@@ -99,13 +107,15 @@ testing it, with root causes.
 | Stage | Cold | Warm |
 |---|---|---|
 | Capture (400×300) | 96 ms | 96 ms |
-| Recognition | 484 ms | **33 ms** |
+| Recognition, one line | 484 ms | **33 ms** |
+| Recognition, full page | 440 ms | **116 ms** |
+| A whole `plan`, end to end | 532 ms | **161 ms** |
 | Speech startup | — | ~145 ms |
 
-Recognition is 15× faster warm — almost all of the cold cost is loading the
-Vision framework. This is the strongest argument for the resident-daemon design:
-a long-running Slicer pays that once, and the 900 ms first-word budget is then
-comfortable rather than tight.
+Almost all of the cold cost is loading the Vision framework, paid once per
+process. That is what the daemon is for, and end to end it makes a reading
+**3.3× faster** — comfortably inside the 900 ms first-word budget rather than
+scraping against it.
 
 ## Deliberately not built yet
 
@@ -113,6 +123,8 @@ Named honestly rather than left to be discovered:
 
 - **The deep lane.** No Docling, no vision model. XY-cut handles columns well
   and will struggle on dense application chrome.
+- **A menu bar presence.** The daemon runs headless; `rumps` is the intended
+  shell for a status item and a visible state.
 - **Accessibility tree.** Should come before the deep lane — it is the cheapest
   accuracy win available, and screenpipe reaches for it first at scale.
 - **Interactive-capture coordinates.** `screencapture -i` does not report the

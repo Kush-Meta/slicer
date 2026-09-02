@@ -38,12 +38,34 @@ def main(argv: list[str] | None = None) -> int:
         p.add_argument("--follow", action="store_true",
                        help="keep reading as the content scrolls")
 
+    daemon_parser = sub.add_parser("daemon", help="run the resident Slicer process")
+    daemon_parser.add_argument("--voice")
+    daemon_parser.add_argument("--rate", type=int)
+    daemon_parser.add_argument("--no-highlight", action="store_true",
+                               help="do not draw the on-screen highlight")
+
+    sub.add_parser("status", help="is a daemon running?")
+    sub.add_parser("stop", help="shut down the running daemon")
     sub.add_parser("doctor", help="check this machine and measure the latency budget")
 
     args = parser.parse_args(argv)
     if args.command == "doctor":
         from .doctor import run as run_doctor
         return run_doctor()
+    if args.command == "daemon":
+        from .daemon import Daemon
+        return Daemon(voice=args.voice, rate=args.rate,
+                      highlight=not args.no_highlight).run()
+    if args.command == "status":
+        return _status()
+    if args.command == "stop":
+        return _stop()
+
+    # Prefer the resident daemon: recognition is 15x faster in a warm process.
+    # Falling back in-process means the CLI always works, daemon or not.
+    forwarded = _via_daemon(args)
+    if forwarded is not None:
+        return forwarded
 
     conductor = Conductor(
         narrator=Narrator(voice=getattr(args, "voice", None), rate=getattr(args, "rate", None)),
@@ -114,6 +136,75 @@ def main(argv: list[str] | None = None) -> int:
         _print_skipped(reading)
     if args.timings:
         print(f"\n{DIM}{reading.timings.render()}{RESET}")
+    return 0
+
+
+def _via_daemon(args) -> int | None:
+    """Send this command to the daemon, or None if there isn't one."""
+    from . import ipc  # noqa: PLC0415
+
+    region = None
+    if args.region:
+        try:
+            region = [int(part) for part in args.region.split(",")]
+        except ValueError:
+            return None
+    payload = {"method": args.command,
+               "params": {"region": region, "file": args.file,
+                          "follow": getattr(args, "follow", False)}}
+    stream = ipc.request(payload)
+    if stream is None:
+        return None
+
+    print(f"\n{DIM}via daemon{RESET}")
+    failed = False
+    for message in stream:
+        if message.get("event") == "block":
+            print(f"  {DIM}{message['index'] + 1:2d}/{message['total']}{RESET} "
+                  f"{message['text']}")
+        elif message.get("event") == "advance":
+            print(f"  {DIM}--- screen {message['screen']} ---{RESET}")
+        elif message.get("ok") is False:
+            failed = True
+            print(f"{RED}slicer:{RESET} {message.get('error')}", file=sys.stderr)
+            if message.get("remedy"):
+                print(f"\n{message['remedy']}", file=sys.stderr)
+        elif message.get("ok"):
+            for index, block in enumerate(message.get("blocks", []), 1):
+                narration = f"{DIM}{block['prefix']}{RESET} " if block["prefix"] else ""
+                print(f"  {DIM}{index:2d}{RESET} {CYAN}{block['kind']:<10}{RESET} "
+                      f"{narration}{block['text']}")
+            for note in message.get("notes", []):
+                print(f"  {YELLOW}note{RESET} {note}")
+            if args.timings and message.get("timings"):
+                spent = "  ".join(f"{k} {v:.0f}ms" for k, v in message["timings"].items())
+                print(f"\n{DIM}{spent}{RESET}")
+    return 1 if failed else 0
+
+
+def _status() -> int:
+    from . import ipc  # noqa: PLC0415
+    stream = ipc.request({"method": "ping"})
+    if stream is None:
+        print(f"{DIM}no daemon running{RESET}  "
+              f"start one with: ./bin/slicer daemon")
+        return 1
+    for message in stream:
+        print(f"{BOLD}daemon running{RESET}  pid {message.get('pid')}  "
+              f"up {message.get('uptime')}s  {message.get('readings')} readings")
+        return 0
+    return 1
+
+
+def _stop() -> int:
+    from . import ipc  # noqa: PLC0415
+    stream = ipc.request({"method": "shutdown"})
+    if stream is None:
+        print(f"{DIM}no daemon running{RESET}")
+        return 1
+    for _ in stream:
+        break
+    print("daemon stopped")
     return 0
 
 
