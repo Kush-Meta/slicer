@@ -102,6 +102,21 @@ tests/
 `ENGINEERING_LOG.md` records how this was built and every bug found while
 testing it, with root causes.
 
+## Design documents
+
+Three companion documents, in the order they were written:
+
+- **[Architecture brief](https://claude.ai/code/artifact/463d9a13-ea5b-4a29-92df-03603974553c)**
+  — the original design: the agent graph, the fast/deep lane split, and the
+  latency argument. Written before any code.
+- **[Pre-mortem](https://claude.ai/code/artifact/4090e45b-0de3-4223-96ce-c86cae847723)**
+  — 63 failure modes, the grounding invariant, and lessons from nine
+  open-source projects that hit these walls first.
+- **[Internals](https://claude.ai/code/artifact/93f2e045-4032-46ce-9f77-cc0855cd2174)**
+  — how it actually works now: the nine stages, the daemon's thread
+  architecture, the three coordinate spaces, and the reasoning behind each
+  fork in the road.
+
 ## Measured on this machine (M-series, macOS 15.3.1)
 
 | Stage | Cold | Warm |

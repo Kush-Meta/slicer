@@ -403,9 +403,14 @@ epoch cancellation and transport; pipeline error paths and their remedies.
 tests/test_slicer.py     28   model, layout, editor, capture
 tests/test_narrator.py    8   epochs, transport, cancellation
 tests/test_conductor.py   4   pipeline error paths
+tests/test_picker.py      8   coordinate conversion, selection
+tests/test_fingerprint.py 12  OCR-tolerant matching
+tests/test_continuity.py  6   reading past the fold
+tests/test_overlay.py     4   highlight placement
+tests/test_daemon.py      7   IPC protocol, real daemon spawn
 tests/test_golden.py      7   WebKit-rendered pages
                          --
-                         47   all passing
+                         84   all passing
 ```
 
 Run everything with `./.venv/bin/python tests/run_all.py`.
@@ -521,7 +526,114 @@ and a paragraph never read at all.
 
 ---
 
-## 9. Open items
+## 9. Phase three: the daemon, the hotkey, and the highlight
+
+### 9.1 The daemon exists for one number and is shaped by another
+
+*The number it exists for.* Recognition costs 440 ms in a cold process and
+116 ms in a warm one on a full page. End to end, a reading plan goes from
+532 ms to 161 ms - 3.3x. Almost all of the difference is loading the Vision
+framework, which is paid once per process.
+
+A note on honesty in measurement: an earlier figure of "33 ms warm" was real
+but came from a single-line image. On a realistic page the warm cost is 116 ms.
+Both are true; only the second is representative, and quoting the first would
+have flattered the design.
+
+*The number it is shaped by.* **AppKit is main-thread only.** The region picker
+and the highlight overlay both need the main run loop, so the main thread
+cannot be the one blocking on a socket. The architecture follows directly:
+
+    main thread    - AppKit run loop, all UI, drains a work queue every 20 ms
+    socket threads - accept, parse, and run recognition / layout / speech
+
+Work that touches a window is put on the queue and waited on. Everything else
+runs wherever it lands. This is why `test_daemon.py` spawns a real process
+rather than using a fake: the thing worth verifying is precisely the part a
+fake would replace.
+
+### 9.2 Transport: newline JSON over a Unix domain socket
+
+Chosen over a localhost TCP port and over a JSON-RPC library, for reasons in
+that order of importance:
+
+* A Unix socket **cannot be reached from the network at all**. A localhost port
+  can be, by anything else on the machine. This process moves screen contents
+  around; the transport should not be addressable.
+* Filesystem permissions are the access control - a `0700` directory and a
+  `0600` socket. No tokens, no handshake, nothing to get wrong.
+* Replies are **streamed**: a reading emits a line per block as it is spoken,
+  and the client prints them live. Request-response framing would have to be
+  worked around to do that.
+* A socket file with nothing behind it is a crashed daemon, not a running one.
+  `ipc.connect` detects and clears it, so a crash never blocks the next start.
+
+This is the shape Core Lightning and signal-cli use for the same job, and it
+needs nothing outside the standard library.
+
+### 9.3 The hotkey is a privacy decision, not a technical one
+
+Two APIs can register a system-wide hotkey on macOS.
+
+`NSEvent.addGlobalMonitorForEventsMatchingMask` is the modern one. It requires
+Accessibility permission and it delivers **every keystroke on the system** to
+this process - the shape of a keylogger, whatever the intent.
+
+Carbon's `RegisterEventHotKey` is formally deprecated and entirely stable. It
+requires **no permission at all** and delivers exactly the one combination
+registered. Electron, VS Code and Slack all still use it, because Apple never
+shipped a replacement for this specific job.
+
+Slicer already asks for Screen Recording. Asking for keystroke access as well,
+when a narrower API does the job, would be the wrong trade. We use the Carbon
+route through `quickmachotkey`, which wraps it properly. Verified in practice:
+the daemon registers `cmd-ctrl-R` with no permission prompt.
+
+The one cost: modifier-only shortcuts cannot be expressed this way. They need
+an event tap, and we would rather have no such shortcut than that permission.
+
+### 9.4 The highlight: three lines that are each easy to omit
+
+The overlay is visually simple and has three properties that are not:
+
+* `setIgnoresMouseEvents_(True)` - it sits above everything, so without this it
+  swallows every click on the screen.
+* `setSharingType_(NSWindowSharingNone)` - otherwise the highlight appears in
+  Slicer's **own** next capture and is recognized as content during a following
+  read. This is correctness, not cosmetics.
+* `canJoinAllSpaces` - a reading should survive the user switching desktops.
+
+A test asserts the first two are present in the source, because their absence
+produces symptoms nowhere near their cause.
+
+Placement crosses two conversions - Retina pixels to points, then
+screencapture's top-left origin to AppKit's bottom-left one - and both are
+tested, including that a 2x capture resolves to the same rectangle as a 1x one.
+A capture whose origin is unknown returns `None`: better to draw nothing than
+to draw a box in the wrong place.
+
+### 9.5 Prior art consulted before building
+
+Per instruction, each of these was checked before writing code:
+
+| Source | What it decided |
+|---|---|
+| Carbon vs NSEvent discussions in electrobun and KeePassXC | Use Carbon; avoid the Accessibility requirement entirely |
+| `quickmachotkey` | Wraps `RegisterEventHotKey` correctly; no hand-rolled bindings |
+| Core Lightning, signal-cli | Newline-JSON over a Unix socket is the established local-IPC shape |
+| `NSWindowStyles`, Electron click-through workarounds | `setIgnoresMouseEvents_` is the mechanism for a click-through overlay |
+| `rumps` | The intended menu bar shell when Slicer needs visible idle state; not yet used |
+
+### 9.6 One bug, minor
+
+Stage timings never printed on the daemon path. The client's reply handler
+tested `"blocks" in message` before `message.get("ok")`, so a plan response -
+which carries both - took the earlier branch and returned before reaching the
+timings line. Merged into a single branch.
+
+---
+
+## 10. Open items
 
 Ordered by what blocks what.
 
