@@ -116,6 +116,9 @@ def _normalize(text: str) -> str:
     text = unicodedata.normalize("NFKC", text)
     text = _URL_RE.sub(_speak_url, text)
     text = _EMOJI_RUN_RE.sub(" ", text)
+    # Zero-width spaces and other format characters are not whitespace to
+    # str.strip, so a block containing only them survives as a silent utterance.
+    text = "".join(ch for ch in text if unicodedata.category(ch) != "Cf")
     return _WS_RE.sub(" ", text).strip()
 
 

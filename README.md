@@ -73,9 +73,18 @@ slicer/
   telemetry.py        stage timings to ~/.slicer/telemetry.jsonl
   doctor.py           environment checks and the latency budget
 tests/
-  fixtures.py         renders pages whose correct reading order is known
-  test_slicer.py      20 tests, no external test runner needed
+  fixtures.py         synthetic pages whose correct reading order is known
+  webfixtures.py      real HTML rendered by WebKit, via a subprocess
+  golden.py           the golden set: seven pages with known reading order
+  test_slicer.py      model, layout, editor and capture
+  test_narrator.py    epochs, transport, cancellation
+  test_conductor.py   pipeline error paths
+  test_golden.py      the WebKit corpus
+  run_all.py          runs every suite; no external test runner needed
 ```
+
+`ENGINEERING_LOG.md` records how this was built and every bug found while
+testing it, with root causes.
 
 ## Measured on this machine (M-series, macOS 15.3.1)
 
@@ -108,8 +117,9 @@ Named honestly rather than left to be discovered:
 
 ## Known limits
 
-- Epoch cancellation is implemented and exercised by hand, but has no automated
-  test — a race that only appears under real audio timing.
+- Epoch cancellation is tested through a fake speech backend, not live audio.
+  A race that only appears with real `say` process timing would not be caught.
+- No non-Latin script is in the test corpus.
 - Paused readings restart the current block rather than resuming mid-utterance,
   because `say` cannot be resumed. Moving to AVSpeechSynthesizer in-process
   fixes this and removes the ~145 ms spawn cost.
@@ -124,7 +134,7 @@ Named honestly rather than left to be discovered:
 ```bash
 python3 -m venv .venv
 ./.venv/bin/pip install pyobjc-framework-Vision pyobjc-framework-Quartz
-./.venv/bin/python tests/test_slicer.py
+./.venv/bin/python tests/run_all.py
 ```
 
 Grant Screen Recording to your terminal in System Settings → Privacy &

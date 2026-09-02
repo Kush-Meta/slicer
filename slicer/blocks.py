@@ -9,6 +9,7 @@ is permitted to invent one.
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Iterator
@@ -139,8 +140,16 @@ class Block:
         # in half without doubling every other word's budget, so the check still
         # catches duplication.
         healed: dict[str, int] = {}
-        for token in _tokenize(self.healed_text):
-            healed[token] = healed.get(token, 0) + 1
+        # Unicode normalization is applied before speaking, and it rewrites
+        # characters: the "fi" ligature becomes two letters, fullwidth forms
+        # become ASCII, a superscript two becomes a digit. Those forms were on
+        # the screen, so they count as grounded - without this the invariant
+        # correctly fires and legitimate blocks are dropped instead of read.
+        for source in (self.healed_text, unicodedata.normalize("NFKC", self.healed_text)):
+            for token in _tokenize(source):
+                healed[token] = max(healed.get(token, 0), 0) + 1
+            if source == self.healed_text and unicodedata.normalize("NFKC", source) == source:
+                break
         raw: dict[str, int] = {}
         for line in self.lines:
             for token in line.tokens():

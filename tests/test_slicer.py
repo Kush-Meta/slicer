@@ -72,13 +72,21 @@ def test_narrow_navigation_column_is_skipped():
 
 
 def test_equal_columns_are_not_mistaken_for_navigation():
-    """Two narrow columns of short lines are a two-column page, not two sidebars."""
+    """Two columns of equal width are a two-column page, not two sidebars.
+
+    Only the skip behaviour is asserted. Two narrow columns of two-word items
+    are genuinely ambiguous - visually that is also a two-column grid - so the
+    reading order is not pinned here. What must never happen is a column being
+    silently dropped. Column order on real prose is covered by the golden set.
+    """
     short_l = ["Left one", "Left two", "Left three"]
     short_r = ["Right one", "Right two", "Right three"]
     path, expected = fixtures.two_column(short_l, short_r)
     slice_ = layout.build_slice(recognize(path))
     assert slice_.skipped() == [] or slice_.degraded
-    assert " ".join(b.text for b in slice_.readable()) == " ".join(expected)
+    read = " ".join(b.text for b in slice_.readable())
+    for phrase in expected:
+        assert phrase in read, f"{phrase!r} was lost"
 
 
 def test_ordering_is_deterministic():
@@ -88,7 +96,110 @@ def test_ordering_is_deterministic():
     assert len(runs) == 1
 
 
+def test_three_columns_are_all_read():
+    """Regression: the third column was silently deleted.
+
+    Binary recursion produced left(left(A,B),C), so C was compared against the
+    combined width of A and B and classified as a sidebar. Nothing was spoken
+    and nothing was reported.
+    """
+    # Prose-length lines, deliberately: three columns of two-word items are
+    # genuinely grid-shaped and reading them row-wise is defensible. Running
+    # text is unambiguously columns, which is what this regression is about.
+    columns = [["Alpha begins the first column", "and continues for a while",
+                "before the column ends here"],
+               ["Bravo opens the middle column", "with its own running text",
+                "that fills the middle nicely"],
+               ["Charlie holds the last column", "which must not be dropped",
+                "as it silently once was"]]
+    placed = [fixtures.Placed(t, 40 + c * 320, 60 + i * 36, 16)
+              for c, col in enumerate(columns) for i, t in enumerate(col)]
+    path = fixtures.render(placed, width=1020, height=260)
+    slice_ = layout.build_slice(recognize(path))
+    read = " ".join(b.text for b in slice_.readable())
+    assert read == " ".join(t for col in columns for t in col)
+    assert slice_.skipped() == []
+
+
+def test_table_is_read_row_wise():
+    """Regression: grids were read down each column.
+
+    "Region North South West, Revenue 4,318 2,901 5,144" is technically all the
+    text and carries none of the meaning.
+    """
+    rows = [["Region", "Revenue", "Growth"], ["North", "4,318", "12%"],
+            ["South", "2,901", "8%"], ["West", "5,144", "21%"]]
+    placed = [fixtures.Placed(cell, 80 + c * 260, 60 + r * 46, 20)
+              for r, row in enumerate(rows) for c, cell in enumerate(row)]
+    path = fixtures.render(placed, width=900, height=300)
+    blocks = layout.build_slice(recognize(path)).readable()
+    assert all(b.kind == BlockKind.TABLE_ROW for b in blocks)
+    assert [b.text for b in blocks] == [" ".join(row) for row in rows]
+
+
+def test_a_sidebar_beside_a_paragraph_is_not_a_table():
+    """Regression: table detection interleaved navigation with body text.
+
+    A column of one-word links has a median line length of one, which passed
+    the median test. It produced "Home The body text begins here" as one row.
+    """
+    path, _ = fixtures.sidebar_and_body(
+        ["Home", "About", "Pricing", "Docs", "Blog"],
+        ["The body text begins here and continues.",
+         "A second sentence of real content follows."])
+    blocks = layout.build_slice(recognize(path)).readable()
+    assert not any(b.kind == BlockKind.TABLE_ROW for b in blocks)
+    assert not any("Home" in b.text for b in blocks)
+
+
+def test_over_skip_guard_counts_words_not_blocks():
+    """Five one-word links are five blocks but a quarter of the words.
+
+    Counting blocks made a small sidebar look like 83% of the page, which
+    tripped the guard and un-skipped the navigation.
+    """
+    path, _ = fixtures.sidebar_and_body(
+        ["Home", "About", "Pricing", "Docs", "Blog"],
+        ["The body text begins here and continues.",
+         "A second sentence of real content follows."])
+    slice_ = layout.build_slice(recognize(path))
+    assert len(slice_.skipped()) == 5
+    assert slice_.degraded == []
+
+
+def test_no_content_is_ever_silently_lost():
+    """Whatever the classification, every recognized line is accounted for."""
+    for path in [
+        fixtures.two_column(BODY_L, BODY_R)[0],
+        fixtures.header_two_column("A Full Width Headline", BODY_L, BODY_R)[0],
+        fixtures.sidebar_and_body(["Home", "About", "Docs"], BODY_L)[0],
+    ]:
+        result = recognize(path)
+        slice_ = layout.build_slice(result)
+        placed = sum(len(b.lines) for b in slice_.blocks)
+        assert placed == len(result.lines), f"{len(result.lines) - placed} lines vanished"
+
+
 # -- the grounding invariant ----------------------------------------------
+
+def test_unicode_normalisation_stays_grounded():
+    """Regression: NFKC rewrote characters and the blocks were dropped.
+
+    Normalization turns the "fi" ligature into two letters and a superscript
+    two into a digit. Those tokens were not in the raw source, so the invariant
+    fired and the Conductor discarded legitimate text - common in PDFs.
+    """
+    for source, expected in [
+        ("The \ufb01rst \ufb02ight was \ufb01ne.", "The first flight was fine."),
+        ("Sample\u00b2 here", "Sample2 here"),
+    ]:
+        assert editor.to_speech(_block([source])).text == expected
+
+
+def test_fullwidth_text_stays_grounded():
+    text = editor.to_speech(_block(["\uff26\uff55\uff4c\uff4c\uff57\uff49\uff44\uff54\uff48"])).text
+    assert text == "Fullwidth"
+
 
 def test_invented_word_is_rejected():
     block = _block(["The quick brown fox."])
@@ -177,6 +288,12 @@ def test_real_code_is_detected():
 
 def test_chrome_blocks_are_not_spoken():
     assert editor.to_speech(_block(["Home"], kind=BlockKind.CHROME)) is None
+
+
+def test_degenerate_blocks_do_not_crash():
+    for text in ["", "   ", "\u200b"]:
+        assert editor.to_speech(_block([text])) is None
+    assert editor.to_speech(_block(["x"])).text == "x"
 
 
 # -- capture ---------------------------------------------------------------
