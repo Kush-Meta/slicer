@@ -33,7 +33,9 @@ def main(argv: list[str] | None = None) -> int:
         p = sub.add_parser(name, help=help_text)
         p.add_argument("--region", help="x,y,w,h in screen points (default: drag to select)")
         p.add_argument("--file", help="read an image file instead of the screen")
-        p.add_argument("--voice", help="a macOS voice name, see: say -v '?'")
+        p.add_argument("--voice", help="a voice name; see: slicer voices")
+        p.add_argument("--speech", choices=["avspeech", "say"],
+                       help="speech backend (default: in-process avspeech)")
         p.add_argument("--rate", type=int, help="words per minute")
         p.add_argument("--fast", action="store_true", help="faster, less accurate recognition")
         p.add_argument("--show-skipped", action="store_true", help="list what was not read")
@@ -59,6 +61,7 @@ def main(argv: list[str] | None = None) -> int:
     menubar_parser.add_argument("--voice")
     menubar_parser.add_argument("--rate", type=int)
 
+    sub.add_parser("voices", help="list the voices available on this Mac")
     sub.add_parser("status", help="is a daemon running?")
     sub.add_parser("stop", help="shut down the running daemon")
     sub.add_parser("doctor", help="check this machine and measure the latency budget")
@@ -76,6 +79,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "menubar":
         from .menubar import main as run_menubar
         return run_menubar(voice=args.voice, rate=args.rate)
+    if args.command == "voices":
+        return _voices()
     if args.command == "status":
         return _status()
     if args.command == "stop":
@@ -88,9 +93,22 @@ def main(argv: list[str] | None = None) -> int:
         if forwarded is not None:
             return forwarded
 
-    from .editor import Verbosity  # noqa: PLC0415
+    from .editor import Verbosity          # noqa: PLC0415
+    from .speech import backend_named       # noqa: PLC0415
+
+    backend = backend_named(args.speech) if getattr(args, "speech", None) else None
+    narrator = Narrator(voice=getattr(args, "voice", None),
+                        rate=getattr(args, "rate", None), backend=backend)
+
+    # A voice that was asked for and silently swapped is worse than no voice
+    # setting at all - especially for someone who cannot see which one is in use.
+    wanted = getattr(args, "voice", None)
+    if wanted and hasattr(narrator.backend, "has_voice") and not narrator.backend.has_voice(wanted):
+        print(f"  {YELLOW}note{RESET} no voice named {wanted!r} on this Mac; using the "
+              f"default.\n       {DIM}See: ./bin/slicer voices{RESET}")
+
     conductor = Conductor(
-        narrator=Narrator(voice=getattr(args, "voice", None), rate=getattr(args, "rate", None)),
+        narrator=narrator,
         layout_config=LayoutConfig(),
         fast_ocr=args.fast,
         verbosity=Verbosity(args.verbosity),
@@ -278,6 +296,17 @@ def _start_background(args) -> int:
     print(f"{RED}slicer:{RESET} the daemon did not come up. See {log_path}",
           file=sys.stderr)
     return 1
+
+
+def _voices() -> int:
+    from .speech import default_backend  # noqa: PLC0415
+    backend = default_backend()
+    names = backend.voice_names() if hasattr(backend, "voice_names") else []
+    print(f"\n{BOLD}{len(names)} voices{RESET}  {DIM}backend: {backend.name}{RESET}\n")
+    for row in range(0, len(names), 4):
+        print("  " + "".join(f"{n:<22}" for n in names[row:row + 4]))
+    print()
+    return 0
 
 
 def _status() -> int:

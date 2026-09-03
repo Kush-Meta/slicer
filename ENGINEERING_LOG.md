@@ -105,7 +105,7 @@ All figures median of repeated runs on the machine above.
 |---|---|---|
 | `screencapture` 400×300 | 96 ms | 96 ms |
 | Vision recognition | 484 ms | **33 ms** |
-| `say` fixed startup | — | ~145 ms |
+| `say` startup | — | *not reliably measurable — see §11.2* |
 | `say` per word | — | ~362 ms |
 
 **Recognition is ~15× faster warm.** Nearly all the cold cost is loading the
@@ -113,13 +113,12 @@ Vision framework, paid once per process. This is the decisive argument for a
 resident daemon: a long-running Slicer pays it at launch and the 900 ms
 first-word budget becomes comfortable rather than tight.
 
-**The `say` startup figure needed care.** A single short utterance measured
-~1030 ms, which appeared to blow the budget on its own. It does not: most of
-that is the duration of the word itself. Timing four utterance lengths (1, 5,
-10, 20 words) and fitting a line gives a slope of ~362 ms per word and an
-intercept of ~145 ms, which is the real cost of beginning to speak. `doctor`
-now uses the same four-point fit rather than a single sample, because a
-headline number that swings 3× between runs is not usable.
+**The `say` startup figure needed care, and later turned out to be wrong.** A
+single short utterance measures ~1030 ms, most of which is the duration of the
+word. Fitting a line through four utterance lengths gave an intercept of
+~145 ms, which was reported as the real cost of beginning to speak. It was not
+reliable — see §11.2, where the same method produced 580 ms from the same
+machine with different words.
 
 **Permission model.** Screen Recording is held by the *terminal* running
 Slicer, not by Slicer. A CLI therefore works today. macOS 15 refuses screen
@@ -633,7 +632,80 @@ timings line. Merged into a single branch.
 
 ---
 
-## 10. Open items
+## 10. Phase four: speech moves in-process
+
+### 10.1 Why
+
+`say` was chosen because it needed no setup. Two costs made that the wrong
+trade for a screen reader:
+
+- A subprocess per utterance is spawn cost paid on **every keypress** while
+  skimming, which is the interaction navigation is built around.
+- A killed process cannot be resumed. Pausing restarted the block from the
+  beginning, which for a listener is not a pause at all.
+
+`AVSpeechSynthesizer` runs in this process. Measured directly: **35–37 ms to
+first audio**, pause and resume mid-sentence, instant stop. It also works with
+no AppKit run loop being pumped, which was the open risk — `slicer navigate`
+blocks its main thread reading keys and has no run loop to spare. Verified
+before building anything on it.
+
+Speech is now behind a `SpeechBackend` protocol with two implementations, so
+`say` remains as a fallback for a machine where the AVFoundation bindings are
+missing, and `--speech say` forces it for comparison.
+
+### 10.2 A measurement that was wrong, and how it was caught
+
+The doctor originally reported `say` startup as a fitted intercept over four
+utterance lengths. Building the new backend produced a contradiction: the same
+method now fitted **580 ms** where it had previously fitted **145 ms**.
+
+The first hypothesis was contention — the in-process synthesizer holding the
+audio device and making `say` wait. That was testable, and it was wrong:
+measuring `say` before the synthesizer existed gave 580 ms too, a 3 ms
+difference.
+
+The actual cause is that a four-point fit with correlated errors returns
+whatever the phrasing implies. The earlier run used distinct words ("one two
+three four five"), the later one repeated the same word; slope came out 362 vs
+240 ms/word, and the intercept moved with it. Neither number was trustworthy.
+
+**Resolution: stop reporting inferred components.** The in-process backend
+exposes `isSpeaking`, so the moment audio starts is directly observable and is
+reported as measured. `say` offers no such signal, so it is reported as what
+can actually be measured about it — the whole round trip for one short word,
+startup and pronunciation together, labelled as not separable.
+
+The lesson is narrower than "measure twice". A derived number that cannot be
+observed directly should be labelled as derived, and checked against a second
+method before it is repeated in three documents — which this one was.
+
+### 10.3 Rate and voices
+
+`--rate` is words per minute for `say` and an opaque 0-to-1 scale for
+AVSpeechUtterance. The two are anchored so the flag means the same thing
+either way: `say`'s default of ~175 wpm maps to AV's default of 0.5, linearly
+and clamped. The scale is not documented as linear, so this is approximate by
+construction and says so.
+
+A voice that was asked for and silently substituted is worse than no voice
+setting at all, particularly for someone who cannot see which voice is in use.
+Unknown voice names are now reported, and `slicer voices` lists the 190
+available on this machine.
+
+### 10.4 A patch that broke initialisation invisibly
+
+A scripted edit inserted a new property in the middle of `__init__`, orphaning
+the two lines that follow it. The class still imported, and twenty tests failed
+with `'FakeNarrator' object has no attribute '_pause'`. Recorded because the
+symptom pointed at the test doubles rather than at the constructor, and because
+it is the second time a scripted multi-function edit has damaged a file. The
+standing rule stands: for changes spanning more than one function, rewrite the
+file.
+
+---
+
+## 11. Open items
 
 Ordered by what blocks what.
 
@@ -641,8 +713,10 @@ Ordered by what blocks what.
    long-running process pays that once. The single largest perceived-speed win.
 2. **On-screen highlight** following the reading, now that the picker returns
    real coordinates. The most convincing thing to show someone.
-3. **Move speech in-process** to `AVSpeechSynthesizer`, removing the ~145 ms
-   spawn cost and enabling mid-utterance resume and word-timing callbacks.
+3. **Word-timing callbacks.** The in-process backend can report which word is
+   being spoken, but the delegate needs a run loop, so it is available under
+   the menu bar app and not inside `navigate`. Needed for word-level cursor
+   tracking.
 4. **Verify continuity against a real scrolling application**, not only the
    cropped-page simulation. Momentum scrolling may overshoot.
 5. **Accessibility tree ahead of the deep lane.** Cheapest accuracy win

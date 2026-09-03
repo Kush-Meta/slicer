@@ -96,34 +96,44 @@ def _check_ocr() -> float | None:
 
 
 def _check_say() -> float | None:
-    """Separate fixed startup cost from speech duration by least squares.
+    """How long until speech actually starts.
 
-    A single short utterance cannot tell them apart - most of the wall clock is
-    the word itself. Four lengths and a line fit give an intercept that is the
-    real cost of beginning to speak.
+    Only the in-process backend can answer this directly: it exposes
+    `isSpeaking`, so the moment audio begins is observable. `say` offers no
+    such signal, and inferring its startup by fitting a line through several
+    utterance lengths turned out to be unreliable - the same method produced
+    145ms and 580ms depending only on which words were used. So `say` is
+    reported as what can actually be measured about it: the whole round trip
+    for one short word, startup and pronunciation together.
     """
-    try:
-        points: list[tuple[int, float]] = []
-        for words in (1, 4, 8, 14):
-            phrase = " ".join(["one"] * words)
-            points.append((words, min(time_to_first_audio(phrase) for _ in range(2))))
+    from .speech import AVSpeechBackend, SayBackend  # noqa: PLC0415
 
-        n = len(points)
-        sx = sum(w for w, _ in points)
-        sy = sum(ms for _, ms in points)
-        sxy = sum(w * ms for w, ms in points)
-        sxx = sum(w * w for w, _ in points)
-        denominator = n * sxx - sx * sx
-        if denominator == 0:
-            return None
-        per_word = (n * sxy - sx * sy) / denominator
-        startup = max((sy - per_word * sx) / n, 0.0)
-        _line(OK, "speech", f"startup {startup:.0f}ms, {per_word:.0f}ms per word "
-                            f"{DIM}(fitted over {n} lengths){RESET}")
-        return startup
-    except Exception as exc:
-        _line(BAD, "speech", str(exc)[:70])
-        return None
+    in_process: float | None = None
+    try:
+        backend = AVSpeechBackend()
+        in_process = min(time_to_first_audio("one", backend=backend) for _ in range(3))
+        _line(OK, "speech (in-process)",
+              f"{in_process:.0f}ms to first audio, measured  "
+              f"{DIM}pauses mid-sentence{RESET}")
+    except Exception as exc:                          # noqa: BLE001
+        _line(WARN, "speech (in-process)", str(exc)[:60])
+
+    try:
+        say = SayBackend()
+        timings = []
+        for _ in range(3):
+            start = time.perf_counter()
+            say.speak("one", voice=None, rate=None, still_current=lambda: True)
+            timings.append((time.perf_counter() - start) * 1000)
+        _line(OK, "speech (say, fallback)",
+              f"{min(timings):.0f}ms round trip for one word  "
+              f"{DIM}start not separable; cannot pause{RESET}")
+        if in_process is None:
+            in_process = min(timings)
+    except Exception as exc:                          # noqa: BLE001
+        _line(WARN, "speech (say, fallback)", str(exc)[:60])
+
+    return in_process
 
 
 def _sample_image() -> str:

@@ -10,16 +10,13 @@ speak after you told it to stop.
 from __future__ import annotations
 
 import itertools
-import shutil
-import subprocess
 import threading
 import time
 from dataclasses import dataclass, field
 from enum import Enum
 
 from .editor import Utterance
-
-SAY = shutil.which("say") or "/usr/bin/say"
+from .speech import SpeechBackend, default_backend
 
 
 class State(str, Enum):
@@ -41,16 +38,22 @@ class Narrator:
 
     _epochs = itertools.count(1)
 
-    def __init__(self, *, voice: str | None = None, rate: int | None = None):
+    def __init__(self, *, voice: str | None = None, rate: int | None = None,
+                 backend: SpeechBackend | None = None):
         self.voice = voice
         self.rate = rate
+        self.backend = backend or default_backend()
         self.state = State.IDLE
         self._epoch = 0
-        self._proc: subprocess.Popen | None = None
         self._lock = threading.Lock()
         self._skip = 0          # +1 next block, -1 previous
         self._pause = threading.Event()
         self._pause.set()       # set means "running"
+
+    @property
+    def can_pause_mid_sentence(self) -> bool:
+        """Whether pausing resumes from the same word or restarts the block."""
+        return self.backend.supports_pause
 
     # -- transport ---------------------------------------------------------
 
@@ -75,14 +78,26 @@ class Narrator:
             self._pause.set()
 
     def toggle_pause(self) -> bool:
+        """Pause or resume. True if now paused.
+
+        With an in-process backend this suspends mid-sentence and resumes from
+        the same word. With `say` there is no such thing - the process is
+        killed and the block restarts - which is precisely why the in-process
+        backend exists.
+        """
         if self._pause.is_set():
             self._pause.clear()
             self.state = State.PAUSED
-            with self._lock:
-                self._kill_locked()   # the current utterance restarts on resume
+            if self.backend.supports_pause:
+                self.backend.pause()
+            else:
+                with self._lock:
+                    self._kill_locked()
             return True
         self._pause.set()
         self.state = State.SPEAKING
+        if self.backend.supports_pause:
+            self.backend.resume()
         return False
 
     def skip(self, delta: int) -> None:
@@ -120,42 +135,40 @@ class Narrator:
         self.state = State.IDLE
 
     def _say(self, text: str, epoch: int) -> bool:
-        """Speak one utterance. False if it was cut short."""
-        args = [SAY]
-        if self.voice:
-            args += ["-v", self.voice]
-        if self.rate:
-            args += ["-r", str(self.rate)]
-        args += ["--", text]
+        """Speak one utterance. False if it was cut short.
 
-        with self._lock:
-            if epoch != self._epoch:
-                return False
-            self._proc = subprocess.Popen(
-                args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-            )
-        proc = self._proc
-        code = proc.wait()
-        with self._lock:
-            if self._proc is proc:
-                self._proc = None
-        return code == 0
+        The seam the tests replace: everything above this line is scheduling,
+        everything below is the platform.
+        """
+        return self.backend.speak(
+            text, voice=self.voice, rate=self.rate,
+            still_current=lambda: epoch == self._epoch,
+        )
 
     def _kill_locked(self) -> None:
-        if self._proc and self._proc.poll() is None:
-            try:
-                self._proc.kill()
-            except OSError:
-                pass
+        self.backend.stop()
 
 
-def time_to_first_audio(sample: str = "Slicer.", voice: str | None = None) -> float:
-    """Measure spawn-to-exit for a very short utterance, in milliseconds.
+def time_to_first_audio(sample: str = "Slicer.", voice: str | None = None,
+                        backend: SpeechBackend | None = None) -> float:
+    """Milliseconds from asking for speech to speech actually starting.
 
-    A floor on how fast this machine can begin speaking at all, which is the
-    number the 900ms first-word budget has to fit inside.
+    This is the floor on how fast the machine can begin talking, and the number
+    the 900ms first-word budget has to fit inside. Measured directly rather
+    than inferred: with an in-process backend we can watch for speech starting,
+    instead of timing a whole subprocess and subtracting a guess.
     """
-    args = [SAY] + (["-v", voice] if voice else []) + ["--", sample]
+    backend = backend or default_backend()
     start = time.perf_counter()
-    subprocess.run(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if hasattr(backend, "_synth"):
+        utterance = backend._av.AVSpeechUtterance.speechUtteranceWithString_(sample)
+        backend._synth.speakUtterance_(utterance)
+        while not backend._synth.isSpeaking():
+            if time.perf_counter() - start > 2.0:
+                break
+            time.sleep(0.002)
+        elapsed = (time.perf_counter() - start) * 1000
+        backend.stop()
+        return elapsed
+    backend.speak(sample, voice=voice, rate=None, still_current=lambda: True)
     return (time.perf_counter() - start) * 1000

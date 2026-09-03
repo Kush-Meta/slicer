@@ -17,6 +17,7 @@ and no models.
 ./bin/slicer plan --file page.png      # show what would be read, silently
 ./bin/slicer read                      # drag a region, then listen
 ./bin/slicer navigate --window         # read it, then move through it by structure
+./bin/slicer voices                    # what this Mac can speak with
 ./bin/slicer read --window             # read the frontmost window, no selection
 ./bin/slicer read --follow             # keep reading as the content scrolls
 ./bin/slicer read --region 0,0,900,600 --timings
@@ -102,6 +103,7 @@ slicer/
   windows.py          naming a target instead of drawing one
   navigator.py        structural movement: headings, tables, spelling
   interactive.py      the key loop, kept responsive while speech runs
+  speech.py           in-process synthesis, with say(1) as a fallback
   editor.py           speakable text + assert_grounded
   narrator.py         speech, transport, epoch cancellation
   conductor.py        the state machine and degradation ladder
@@ -147,7 +149,7 @@ Three companion documents, in the order they were written:
 | Recognition, one line | 484 ms | **33 ms** |
 | Recognition, full page | 440 ms | **116 ms** |
 | A whole `plan`, end to end | 532 ms | **161 ms** |
-| Speech startup | — | ~145 ms |
+| Speech, to first audio | — | **37 ms** (in-process) |
 
 Almost all of the cold cost is loading the Vision framework, paid once per
 process. That is what the daemon is for, and end to end it makes a reading
@@ -174,9 +176,8 @@ Named honestly rather than left to be discovered:
 - Epoch cancellation is tested through a fake speech backend, not live audio.
   A race that only appears with real `say` process timing would not be caught.
 - No non-Latin script is in the test corpus.
-- Paused readings restart the current block rather than resuming mid-utterance,
-  because `say` cannot be resumed. Moving to AVSpeechSynthesizer in-process
-  fixes this and removes the ~145 ms spawn cost.
+
+
 - The doctor's speech figure is a least-squares fit over four utterance lengths;
   expect a spread of tens of milliseconds between runs.
 - Screen Recording permission belongs to the **terminal** running Slicer. A
