@@ -489,7 +489,10 @@ _CODE_KEYWORDS = re.compile(
     r"public|private|static|void|struct|impl|fn|async|await|try|except|catch|throw)\b"
 )
 _CALL_PATTERN = re.compile(r"[A-Za-z_][\w.]*\s*\(")
-_LINE_TERMINATOR = re.compile(r"[:{};,)]\s*$")
+# A trailing comma is how prose wraps, not how a statement ends. Including it
+# was one of three weak signals that agreed on an ordinary paragraph and
+# declared it a code block.
+_LINE_TERMINATOR = re.compile(r"[:{};]\s*$|\)\s*[;{]?\s*$")
 
 
 def _classify(group: list[TextLine], median_h: float,
@@ -529,8 +532,12 @@ def _code_score(group: list[TextLine], text: str,
     ratio = symbols / len(text)
     if ratio > cfg.code_symbol_ratio:
         signals.append(f"{ratio:.0%} symbols")
-    if _CODE_KEYWORDS.search(text):
-        signals.append("code keyword")
+    # Keywords count only at the start of a line. Half of them are ordinary
+    # English - "down from one hundred", "for the quarter", "if that happens" -
+    # and matching anywhere in the text turned prose into code. Code keywords
+    # begin statements; English ones almost never begin a wrapped line.
+    if any(_CODE_KEYWORDS.match(line.text.strip()) for line in group):
+        signals.append("leading code keyword")
     if _CALL_PATTERN.search(text):
         signals.append("call syntax")
     if any(_LINE_TERMINATOR.search(line.text) for line in group):

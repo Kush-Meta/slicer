@@ -11,6 +11,14 @@ Everything runs on your Mac. Nothing is uploaded, no account, no network calls
 at all — the recognition and the speech are both Apple frameworks already on
 the machine.
 
+![Slicer reading a page: the highlight moves down the left column, then to the top of the right one, while the navigation sidebar is outlined and skipped](docs/demo.gif)
+
+<sub>Real output. The page is rendered by WebKit and run through the same
+capture, recognition, layout and editor stages a live reading uses; each frame
+highlights the block Slicer actually chose next, captioned with the words it
+would speak. Regenerate with `./.venv/bin/python scripts/make_demo.py`. What it
+cannot show is the sound.</sub>
+
 ```bash
 ./bin/slicer menubar          # run it in the menu bar, then press ⌘⌃R anywhere
 ./bin/slicer navigate --window   # read the frontmost window and move around it
@@ -167,6 +175,8 @@ slicer/
   overlay.py            the highlight that follows the reading
   menubar.py            the status item, and the run loop it brings with it
   settings.py           preferences that survive a restart
+scripts/                doctor-adjacent tools: content-protection check,
+                        pipeline profiler, and the README animation
 tests/                  146 tests across 15 suites, no external runner needed
 ```
 

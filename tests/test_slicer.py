@@ -304,6 +304,37 @@ def test_prose_is_not_mistaken_for_code():
         assert _code_score(line, text, cfg)[0] is None, text
 
 
+def test_ordinary_prose_is_not_called_code():
+    """Regression: a paragraph was announced as a five-line code block.
+
+    Three weak signals agreed on plain prose - the word "from" in "down from
+    one hundred", a wrapped line ending in a comma, and slightly staggered line
+    starts. Keywords now count only at the start of a line, because half of
+    them are ordinary English, and a trailing comma is how prose wraps rather
+    than how a statement ends.
+    """
+    from slicer.layout import LayoutConfig, _code_score
+    prose = [
+        ["Latency improved across every service this quarter,",
+         "down from one hundred and twelve at the start."],
+        ["We will decide if that happens, and then",
+         "return to the original plan for the quarter."],
+    ]
+    for lines in prose:
+        group = [TextLine(id=f"l{i}", text=t, confidence=1.0, box=Box(i * 4, i * 20, 200, 18))
+                 for i, t in enumerate(lines)]
+        kind, reason = _code_score(group, " ".join(lines), LayoutConfig())
+        assert kind is None, f"prose called {kind} because of {reason}"
+
+
+def test_code_in_other_languages_is_detected():
+    from slicer.layout import LayoutConfig, _code_score
+    lines = ["const x = compute(y);", "let z = x * 2;"]
+    group = [TextLine(id=f"l{i}", text=t, confidence=1.0, box=Box(0, i * 20, 200, 18))
+             for i, t in enumerate(lines)]
+    assert _code_score(group, " ".join(lines), LayoutConfig())[0] == BlockKind.CODE
+
+
 def test_real_code_is_detected():
     from slicer.layout import LayoutConfig, _code_score
     text = "def rotate(cert): if cert.expires_in() < 30: renew(cert)"
