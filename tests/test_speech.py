@@ -96,6 +96,34 @@ def test_a_superseded_utterance_is_never_spoken():
     assert spoken is False
 
 
+def test_consecutive_utterances_each_actually_speak():
+    """Regression: a reused synthesizer spoke once and then silently never again.
+
+    AVSpeechSynthesizer needs a run loop to reset between utterances when it is
+    reused. Without one it reported isSpeaking for the first utterance and never
+    afterwards, so every later call blocked until its timeout and returned
+    having made no sound. Nothing raised; the reading was simply silent.
+
+    Detected by length: real speech takes longer for more words, while a
+    timeout takes the same time regardless. The old behaviour would make these
+    two durations equal.
+    """
+    import time
+    backend = AVSpeechBackend()
+    backend.speak("one", voice=None, rate=None, still_current=lambda: True)
+
+    def duration(phrase: str) -> float:
+        start = time.perf_counter()
+        backend.speak(phrase, voice=None, rate=None, still_current=lambda: True)
+        return time.perf_counter() - start
+
+    short = duration("one")
+    longer = duration("one two three four five six seven eight")
+    assert longer > short * 1.5, (
+        f"a longer phrase took {longer:.2f}s against {short:.2f}s for a short one - "
+        "speech is probably not starting at all")
+
+
 def test_stop_is_safe_when_nothing_is_speaking():
     AVSpeechBackend().stop()      # must not raise
     SayBackend().stop()

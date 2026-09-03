@@ -177,7 +177,7 @@ def main(argv: list[str] | None = None) -> int:
             for note in reading.notes:
                 print(f"  {YELLOW}note{RESET} {note}")
         else:
-            conductor.read(source, on_progress=on_progress)
+            conductor.read_responsive(source, on_progress=on_progress)
     except KeyboardInterrupt:
         conductor.narrator.stop()
         print(f"\n{DIM}stopped{RESET}")

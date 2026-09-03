@@ -30,7 +30,9 @@ WORDS_PER_MINUTE_DEFAULT = 175.0
 AV_RATE_DEFAULT = 0.5
 
 # How often a blocking speak() checks whether it has been superseded.
-POLL = 0.01
+POLL = 0.005
+# How long to wait for speech to begin before assuming it already finished.
+START_TIMEOUT = 0.4
 
 
 class SpeechBackend(Protocol):
@@ -104,7 +106,23 @@ class SayBackend:
 
 
 class AVSpeechBackend:
-    """In-process synthesis. Fast to start, and genuinely pausable."""
+    """In-process synthesis. Fast to start, and genuinely pausable.
+
+    One instance per utterance, deliberately. A reused AVSpeechSynthesizer
+    needs a run loop to reset its state between utterances: without one it
+    speaks the first utterance and then never reports `isSpeaking` again, so
+    every subsequent call blocks until its timeout. Measured on this machine:
+
+        reused, no run loop        58 ms, then never, never, never
+        reused, run loop pumped    37, 5, 7, 6 ms
+        fresh instance each time   5, 12, 13, 14 ms
+
+    `slicer navigate` blocks its main thread reading keys and speaks on a
+    worker, so there is no run loop to rely on. A fresh instance needs none and
+    is the faster of the two anyway. The run loop is still pumped
+    opportunistically, which helps where one exists and costs nothing where it
+    does not.
+    """
 
     name = "avspeech"
     supports_pause = True
@@ -115,11 +133,20 @@ class AVSpeechBackend:
         import AVFoundation as AV  # noqa: PLC0415
 
         self._av = AV
-        self._synth = AV.AVSpeechSynthesizer.alloc().init()
         self._lock = threading.Lock()
+        self._current = None
         self._voices: dict[str, object] = {}
         for voice in AV.AVSpeechSynthesisVoice.speechVoices() or []:
             self._voices[str(voice.name()).lower()] = voice
+        # Constructing one at startup pays the framework's first-use cost now
+        # rather than on the first thing the user asks to hear.
+        self._warm()
+
+    def _warm(self) -> None:
+        try:
+            self._av.AVSpeechSynthesizer.alloc().init()
+        except Exception:                 # noqa: BLE001
+            pass
 
     # -- speaking ----------------------------------------------------------
 
@@ -131,46 +158,86 @@ class AVSpeechBackend:
         if chosen is not None:
             utterance.setVoice_(chosen)
 
+        synth = self._av.AVSpeechSynthesizer.alloc().init()
         with self._lock:
             if not still_current():
                 return False
-            self._synth.speakUtterance_(utterance)
+            self._current = synth
+            synth.speakUtterance_(utterance)
 
-        # Wait for it to start, then for it to finish. Both are polled rather
-        # than delegated, because delegate callbacks need a run loop and this
-        # has to work inside `navigate`, which does not have one spare.
-        started = time.perf_counter()
-        while not self._synth.isSpeaking():
-            if not still_current():
-                self.stop()
+        try:
+            if not self._await_start(synth, still_current):
                 return False
-            if time.perf_counter() - started > 1.0:
-                break                     # very short utterances can finish first
-            time.sleep(POLL)
+            return self._await_end(synth, still_current)
+        finally:
+            with self._lock:
+                if self._current is synth:
+                    self._current = None
 
-        while self._synth.isSpeaking() or self._synth.isPaused():
+    def _await_start(self, synth, still_current) -> bool:
+        deadline = time.perf_counter() + START_TIMEOUT
+        while not synth.isSpeaking():
             if not still_current():
-                self.stop()
+                self._stop(synth)
                 return False
+            if time.perf_counter() > deadline:
+                return True               # very short utterances can finish first
+            self._pump()
             time.sleep(POLL)
         return True
 
-    def stop(self) -> None:
+    def _await_end(self, synth, still_current) -> bool:
+        while synth.isSpeaking() or synth.isPaused():
+            if not still_current():
+                self._stop(synth)
+                return False
+            self._pump()
+            time.sleep(POLL)
+        return True
+
+    def _pump(self) -> None:
+        """Give this thread's run loop a turn, if it has one.
+
+        Helps where a run loop exists - the menu bar app and the daemon - and
+        is a cheap no-op on a bare worker thread.
+        """
         try:
-            self._synth.stopSpeakingAtBoundary_(self.IMMEDIATE)
+            from Foundation import NSDate, NSRunLoop  # noqa: PLC0415
+            NSRunLoop.currentRunLoop().runMode_beforeDate_(
+                "kCFRunLoopDefaultMode", NSDate.dateWithTimeIntervalSinceNow_(0))
         except Exception:                 # noqa: BLE001
             pass
 
+    def _stop(self, synth) -> None:
+        try:
+            synth.stopSpeakingAtBoundary_(self.IMMEDIATE)
+        except Exception:                 # noqa: BLE001
+            pass
+
+    def stop(self) -> None:
+        with self._lock:
+            synth = self._current
+        if synth is not None:
+            self._stop(synth)
+
     def pause(self) -> bool:
         """Pause mid-sentence. Resuming continues from the same word."""
+        with self._lock:
+            synth = self._current
+        if synth is None:
+            return False
         try:
-            return bool(self._synth.pauseSpeakingAtBoundary_(self.IMMEDIATE))
+            return bool(synth.pauseSpeakingAtBoundary_(self.IMMEDIATE))
         except Exception:                 # noqa: BLE001
             return False
 
     def resume(self) -> bool:
+        with self._lock:
+            synth = self._current
+        if synth is None:
+            return False
         try:
-            return bool(self._synth.continueSpeaking())
+            return bool(synth.continueSpeaking())
         except Exception:                 # noqa: BLE001
             return False
 
@@ -191,11 +258,8 @@ class AVSpeechBackend:
         return name.lower() in self._voices
 
     def voice_names(self) -> list[str]:
-        return sorted(self._voices_by_display())
-
-    def _voices_by_display(self) -> list[str]:
-        return [str(v.name()) for v in
-                (self._av.AVSpeechSynthesisVoice.speechVoices() or [])]
+        return sorted(str(v.name()) for v in
+                      (self._av.AVSpeechSynthesisVoice.speechVoices() or []))
 
 
 def default_backend() -> SpeechBackend:

@@ -303,7 +303,7 @@ class Daemon:
             )
         else:
             reading_state["slice"] = self.conductor.prepare(source).slice
-            reading = self.conductor.read(source, on_progress=on_progress)
+            reading = self.conductor.read_responsive(source, on_progress=on_progress)
         if self.highlight:
             self.on_main(self._hide_highlight)
         ipc.send_line(client, {
@@ -405,7 +405,7 @@ class Daemon:
         try:
             if follow:
                 return self.conductor.read_continuous(source, on_progress=on_progress)
-            return self.conductor.read(source, on_progress=on_progress)
+            return self.conductor.read_responsive(source, on_progress=on_progress)
         finally:
             if self.highlight:
                 self.on_main(self._hide_highlight)
