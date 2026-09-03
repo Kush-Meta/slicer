@@ -11,13 +11,23 @@ Everything runs on your Mac. Nothing is uploaded, no account, no network calls
 at all — the recognition and the speech are both Apple frameworks already on
 the machine.
 
-![Slicer reading a page: the highlight moves down the left column, then to the top of the right one, while the navigation sidebar is outlined and skipped](docs/demo.gif)
+![Slicer reading a filing: a teal box tracks the paragraph being spoken as it moves down the page](docs/demo.gif)
 
-<sub>Real output. The page is rendered by WebKit and run through the same
-capture, recognition, layout and editor stages a live reading uses; each frame
+<sub>Slicer reading an SEC filing in Preview — a PDF, where the accessibility
+tree gives a screen reader almost nothing. The box marks the block being
+spoken. Recorded on macOS 15.3; the full clip is attached to the
+[latest release](https://github.com/Kush-Meta/slicer/releases). Silent, because
+capturing system audio needs a virtual audio device.</sub>
+
+### Why the order is the hard part
+
+![The highlight reads down the left column, crosses to the top of the right one, and skips the outlined navigation](docs/reading-order.gif)
+
+<sub>Generated from real pipeline output, not drawn: the same capture,
+recognition, layout and editor stages a live reading uses. Each frame
 highlights the block Slicer actually chose next, captioned with the words it
-would speak. Regenerate with `./.venv/bin/python scripts/make_demo.py`. What it
-cannot show is the sound.</sub>
+would speak, with skipped navigation outlined. Regenerate with
+`./.venv/bin/python scripts/make_demo.py`.</sub>
 
 ```bash
 ./bin/slicer menubar          # run it in the menu bar, then press ⌘⌃R anywhere
