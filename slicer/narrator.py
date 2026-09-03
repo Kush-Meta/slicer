@@ -149,26 +149,19 @@ class Narrator:
         self.backend.stop()
 
 
-def time_to_first_audio(sample: str = "Slicer.", voice: str | None = None,
+def time_to_first_audio(sample: str = "one", voice: str | None = None,
                         backend: SpeechBackend | None = None) -> float:
-    """Milliseconds from asking for speech to speech actually starting.
+    """Milliseconds until speech actually starts.
 
-    This is the floor on how fast the machine can begin talking, and the number
-    the 900ms first-word budget has to fit inside. Measured directly rather
-    than inferred: with an in-process backend we can watch for speech starting,
-    instead of timing a whole subprocess and subtracting a guess.
+    Only a backend that can report when it began speaking gives a real answer.
+    A subprocess cannot, so for `say` this measures the whole round trip and
+    the caller is expected to label it as such rather than pretend it is a
+    startup cost - an earlier version inferred that cost by fitting a line and
+    the answer moved by 400ms depending on which words were used.
     """
     backend = backend or default_backend()
+    if hasattr(backend, "time_to_start"):
+        return backend.time_to_start(sample)
     start = time.perf_counter()
-    if hasattr(backend, "_synth"):
-        utterance = backend._av.AVSpeechUtterance.speechUtteranceWithString_(sample)
-        backend._synth.speakUtterance_(utterance)
-        while not backend._synth.isSpeaking():
-            if time.perf_counter() - start > 2.0:
-                break
-            time.sleep(0.002)
-        elapsed = (time.perf_counter() - start) * 1000
-        backend.stop()
-        return elapsed
     backend.speak(sample, voice=voice, rate=None, still_current=lambda: True)
     return (time.perf_counter() - start) * 1000

@@ -705,7 +705,75 @@ file.
 
 ---
 
-## 11. Open items
+## 11. Finishing pass
+
+Going over the whole surface rather than the parts just touched found four
+bugs, three of them introduced by earlier refactors and invisible to the tests.
+
+### 11.1 Near-identical blocks were all treated as already read
+
+*Symptom.* A tall page with six paragraphs spoke one block and stopped. Five
+paragraphs were never read and nothing was reported.
+
+*Root cause.* `resume_index` tested each block independently for membership
+against everything spoken. The paragraphs differed by a single character, so
+"Paragraph 1 with some real words" scored above threshold against "Paragraph 3
+with some real words", every block looked already-read, and the rest of the
+page was skipped.
+
+This is not a fixture artefact. Real screens are full of near-identical lines:
+table rows, log lines, list items, repeated labels.
+
+*Fix.* Continuity is an **ordered overlap**, not set membership: the tail of
+what has been spoken reappears at the head of what is now on screen. The
+longest such run is what is now looked for, and duplicates cannot fake it
+unless they genuinely appear in sequence. Three regression tests, including one
+asserting that a match *out of* sequence does not count.
+
+*Note.* The existing continuity tests passed throughout, because their fixtures
+used deliberately distinct paragraphs. A test corpus chosen to be easy to read
+is also a corpus chosen to hide this class of bug.
+
+### 11.2 Target flags were never forwarded to the daemon
+
+*Symptom.* `slicer plan --window` hung indefinitely whenever a daemon was
+running.
+
+*Root cause.* The client sent `region`, `file` and `follow`, but not `window`
+or `screen`. With no target the daemon fell through to the interactive picker
+and waited for a drag nobody was there to make.
+
+*Fix.* Forward them, and order the resolution so an explicit target always
+beats the picker.
+
+### 11.3 Two regressions in `doctor` from the latency work
+
+Captures stopped writing files when pixels moved into memory, so `doctor` threw
+on `os.unlink('')`. And `time_to_first_audio` probed for a persistent
+synthesizer attribute that no longer exists after the fresh-instance fix, so it
+silently fell back to timing a whole utterance and reported 624ms where the
+real figure is 5ms.
+
+Both are the same shape: a helper that reaches inside another module's
+implementation rather than asking it. The backend now reports its own start
+latency, and captures release themselves.
+
+The budget line also stopped estimating. It had a hardcoded `200` for capture;
+it now uses the measured value, and says all three numbers are measured.
+
+### 11.4 Product gaps closed
+
+- **Settings persist.** Voice, rate, verbosity, highlight and follow now live
+  in `~/.slicer/settings.json`, mode 0600. A flag beats the file, the file
+  beats the default, and a corrupt file is ignored rather than fatal - it must
+  never stop the tool from speaking.
+- **`--fast` is honest.** Its help text now carries the measured cost rather
+  than describing it as "less accurate".
+- **MIT licence**, and a README written for someone who has never seen this.
+
+---
+
+## 12. Open items
 
 Ordered by what blocks what.
 

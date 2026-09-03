@@ -37,7 +37,9 @@ def main(argv: list[str] | None = None) -> int:
         p.add_argument("--speech", choices=["avspeech", "say"],
                        help="speech backend (default: in-process avspeech)")
         p.add_argument("--rate", type=int, help="words per minute")
-        p.add_argument("--fast", action="store_true", help="faster, less accurate recognition")
+        p.add_argument("--fast", action="store_true",
+                       help="8x faster recognition, but measurably wrong "
+                            "(20%% character agreement on some pages); for benchmarking only")
         p.add_argument("--show-skipped", action="store_true", help="list what was not read")
         p.add_argument("--timings", action="store_true", help="print the stage breakdown")
         p.add_argument("--follow", action="store_true",
@@ -61,6 +63,16 @@ def main(argv: list[str] | None = None) -> int:
     menubar_parser.add_argument("--voice")
     menubar_parser.add_argument("--rate", type=int)
 
+    settings_parser = sub.add_parser("settings", help="show or change saved preferences")
+    settings_parser.add_argument("--voice")
+    settings_parser.add_argument("--rate", type=int)
+    settings_parser.add_argument("--verbosity", choices=["off", "low", "high"])
+    settings_parser.add_argument("--highlight", choices=["on", "off"])
+    settings_parser.add_argument("--follow", choices=["on", "off"])
+    settings_parser.add_argument("--speech", choices=["avspeech", "say"])
+    settings_parser.add_argument("--reset", action="store_true",
+                                 help="forget everything and use the defaults")
+
     sub.add_parser("voices", help="list the voices available on this Mac")
     sub.add_parser("status", help="is a daemon running?")
     sub.add_parser("stop", help="shut down the running daemon")
@@ -79,6 +91,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "menubar":
         from .menubar import main as run_menubar
         return run_menubar(voice=args.voice, rate=args.rate)
+    if args.command == "settings":
+        return _settings(args)
     if args.command == "voices":
         return _voices()
     if args.command == "status":
@@ -94,15 +108,16 @@ def main(argv: list[str] | None = None) -> int:
             return forwarded
 
     from .editor import Verbosity          # noqa: PLC0415
+    from .settings import Settings          # noqa: PLC0415
     from .speech import backend_named       # noqa: PLC0415
 
-    backend = backend_named(args.speech) if getattr(args, "speech", None) else None
-    narrator = Narrator(voice=getattr(args, "voice", None),
-                        rate=getattr(args, "rate", None), backend=backend)
+    prefs = Settings.load().overridden_by(args)
+    backend = backend_named(prefs.speech) if prefs.speech else None
+    narrator = Narrator(voice=prefs.voice, rate=prefs.rate, backend=backend)
 
     # A voice that was asked for and silently swapped is worse than no voice
     # setting at all - especially for someone who cannot see which one is in use.
-    wanted = getattr(args, "voice", None)
+    wanted = prefs.voice
     if wanted and hasattr(narrator.backend, "has_voice") and not narrator.backend.has_voice(wanted):
         print(f"  {YELLOW}note{RESET} no voice named {wanted!r} on this Mac; using the "
               f"default.\n       {DIM}See: ./bin/slicer voices{RESET}")
@@ -111,7 +126,7 @@ def main(argv: list[str] | None = None) -> int:
         narrator=narrator,
         layout_config=LayoutConfig(),
         fast_ocr=args.fast,
-        verbosity=Verbosity(args.verbosity),
+        verbosity=Verbosity(prefs.verbosity),
     )
 
     # Two screen readers talking at once is unusable, and the user cannot see a
@@ -163,7 +178,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  {prefix} {progress.utterance.spoken}")
 
     try:
-        if args.follow:
+        if prefs.follow:
             from .continuity import accessibility_granted  # noqa: PLC0415
             if not accessibility_granted():
                 print(f"  {YELLOW}note{RESET} automatic scrolling needs Accessibility "
@@ -191,6 +206,11 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
+def _prefs_verbosity(args) -> str:
+    from .settings import Settings  # noqa: PLC0415
+    return Settings.load().overridden_by(args).verbosity
+
+
 def _navigate(conductor, reading, args) -> int:
     """Interactive structural navigation - the screen reader interaction."""
     from .interactive import HELP, Session  # noqa: PLC0415
@@ -206,7 +226,7 @@ def _navigate(conductor, reading, args) -> int:
               f"{progress.utterance.spoken}")
 
     session = Session(reading.slice, conductor.narrator,
-                      verbosity=Verbosity(args.verbosity),
+                      verbosity=Verbosity(_prefs_verbosity(args)),
                       label=reading.label, on_block=on_block)
     try:
         return session.run()
@@ -230,6 +250,9 @@ def _via_daemon(args) -> int | None:
             return None
     payload = {"method": args.command,
                "params": {"region": region, "file": args.file,
+                          "window": getattr(args, "window", False),
+                          "screen": getattr(args, "screen", False),
+                          "verbosity": getattr(args, "verbosity", "low"),
                           "follow": getattr(args, "follow", False)}}
     stream = ipc.request(payload)
     if stream is None:
@@ -296,6 +319,33 @@ def _start_background(args) -> int:
     print(f"{RED}slicer:{RESET} the daemon did not come up. See {log_path}",
           file=sys.stderr)
     return 1
+
+
+def _settings(args) -> int:
+    from .settings import Settings  # noqa: PLC0415
+
+    current = Settings() if args.reset else Settings.load()
+    changed = bool(args.reset)
+    for name in ("voice", "rate", "verbosity", "speech"):
+        value = getattr(args, name, None)
+        if value is not None:
+            setattr(current, name, value)
+            changed = True
+    for name in ("highlight", "follow"):
+        value = getattr(args, name, None)
+        if value is not None:
+            setattr(current, name, value == "on")
+            changed = True
+
+    if changed and not current.save():
+        print(f"{RED}slicer:{RESET} could not write settings", file=sys.stderr)
+        return 1
+
+    print(f"\n{BOLD}settings{RESET}  {DIM}{'saved' if changed else 'current'}{RESET}\n")
+    for name, value in current.describe():
+        print(f"  {name:<18} {CYAN}{value}{RESET}")
+    print()
+    return 0
 
 
 def _voices() -> int:

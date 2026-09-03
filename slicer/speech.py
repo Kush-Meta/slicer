@@ -254,6 +254,25 @@ class AVSpeechBackend:
             return None
         return self._voices.get(name.lower())
 
+    def time_to_start(self, text: str = "one") -> float:
+        """Milliseconds from asking for speech to speech actually beginning.
+
+        Directly observable here, unlike with a subprocess: the synthesizer
+        reports isSpeaking, so the moment audio starts can be watched for
+        rather than inferred from how long a whole word took.
+        """
+        utterance = self._av.AVSpeechUtterance.speechUtteranceWithString_(text)
+        synth = self._av.AVSpeechSynthesizer.alloc().init()
+        start = time.perf_counter()
+        synth.speakUtterance_(utterance)
+        while not synth.isSpeaking():
+            if time.perf_counter() - start > 2.0:
+                break
+            time.sleep(0.001)
+        elapsed = (time.perf_counter() - start) * 1000
+        self._stop(synth)
+        return elapsed
+
     def has_voice(self, name: str) -> bool:
         return name.lower() in self._voices
 

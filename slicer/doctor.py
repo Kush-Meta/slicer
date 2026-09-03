@@ -24,14 +24,15 @@ FIRST_WORD_BUDGET_MS = 900
 def run() -> int:
     print(f"\n{BOLD}slicer doctor{RESET}\n")
     failures = 0
+    capture_ms: float | None = None
 
     version = platform.mac_ver()[0]
     major = int(version.split(".")[0]) if version else 0
     _line(OK, "macOS", f"{version} ({platform.machine()})")
     if major >= 15:
-        _line(WARN, "window content protection",
-              "macOS 15+ composites all windows into one framebuffer. Verify that\n"
-              f"       {DIM}windows marked 'do not capture' really are excluded before relying on it.{RESET}")
+        _line(OK, "window content protection",
+              f"verified honoured on 15.3.1  {DIM}re-check each major release:\n"
+              f"       ./.venv/bin/python scripts/verify_content_protection.py{RESET}")
 
     try:
         import Vision  # noqa: F401
@@ -46,11 +47,14 @@ def run() -> int:
         start = time.perf_counter()
         cap = capture_region(0, 0, 400, 300, stability_check=False)
         elapsed = (time.perf_counter() - start) * 1000
-        _line(OK, "screen capture", f"{cap.width}x{cap.height}px, scale {cap.scale}x  {DIM}{elapsed:.0f}ms{RESET}")
-        os.unlink(cap.path)
+        _line(OK, "screen capture",
+              f"{cap.width}x{cap.height}px, scale {cap.scale}x  {DIM}{elapsed:.0f}ms{RESET}")
+        capture_ms = elapsed
+        cap.release()
     except Exception as exc:
         _line(BAD, "screen capture", str(exc).split("\n")[0])
         print(f"       {DIM}Grant Screen Recording to your terminal, then fully quit and reopen it.{RESET}")
+        capture_ms = None
         failures += 1
 
     ocr_ms = _check_ocr()
@@ -59,12 +63,13 @@ def run() -> int:
 
     say_ms = _check_say()
 
-    if ocr_ms is not None and say_ms is not None:
-        budget = 200 + ocr_ms + say_ms          # capture + recognize + speech start
+    if ocr_ms is not None and say_ms is not None and capture_ms is not None:
+        budget = capture_ms + ocr_ms + say_ms
         status = OK if budget <= FIRST_WORD_BUDGET_MS else WARN
         _line(status, "first-word budget",
-              f"~{budget:.0f}ms of {FIRST_WORD_BUDGET_MS}ms "
-              f"{DIM}(capture ~200 + ocr {ocr_ms:.0f} + speech start {say_ms:.0f}){RESET}")
+              f"~{budget:.0f}ms of {FIRST_WORD_BUDGET_MS}ms  "
+              f"{DIM}(capture {capture_ms:.0f} + recognise {ocr_ms:.0f} + "
+              f"speech {say_ms:.0f}, all measured){RESET}")
 
     print()
     if failures:

@@ -86,6 +86,39 @@ def test_a_repeated_header_does_not_rewind_the_reading():
     assert memory.resume_index(after_scroll) == 2
 
 
+def test_near_identical_blocks_are_not_all_treated_as_read():
+    """Regression: one spoken block marked five near-duplicates as already read.
+
+    Screens are full of lines that differ by a character - table rows, log
+    lines, list items. Testing each block independently for membership meant
+    "Paragraph 1 with some words" matched "Paragraph 3 with some words", every
+    block looked already-read, and the rest of the page was silently skipped.
+    Continuity is an ordered overlap, not set membership.
+    """
+    similar = [_block(f"Paragraph {n} with some real words in it here.")
+               for n in range(1, 7)]
+    memory = ReadingMemory()
+    memory.remember(similar[0])
+    assert memory.resume_index(similar) == 1, (
+        "near-identical blocks were mistaken for content already read")
+
+
+def test_an_ordered_overlap_resumes_after_it():
+    """The genuine case: the tail of what was read reappears at the top."""
+    memory = ReadingMemory()
+    memory.remember(_block(P1))
+    memory.remember(_block(P2))
+    assert memory.resume_index([_block(P2), _block(P3)]) == 1
+
+
+def test_a_match_out_of_sequence_does_not_count():
+    """A block that matches but is not part of a run is a coincidence."""
+    memory = ReadingMemory()
+    memory.remember(_block(P1))
+    # P1 reappears, but only after something unread - not an overlap.
+    assert memory.resume_index([_block(P3), _block(P1)]) == 0
+
+
 def test_content_change_is_detected():
     memory = ReadingMemory()
     memory.remember(_block(P1))
