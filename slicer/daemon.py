@@ -73,6 +73,9 @@ class Daemon:
         self.readings = 0
         self.hotkey: str | None = None
         self.hotkey_presses = 0
+        # Set by a host that wants to reflect reading state - the menu bar app
+        # changes its icon and its Read/Stop item from here.
+        self.on_reading_state = None
         self.main_queue: queue.Queue[_Work] = queue.Queue()
         self.running = True
         self._server: socket.socket | None = None
@@ -80,18 +83,34 @@ class Daemon:
 
     # -- main thread -------------------------------------------------------
 
-    def run(self) -> int:
-        """Own the main thread: AppKit run loop plus the work queue."""
+    def start_services(self, *, become_app: bool = True) -> bool:
+        """Warm Vision, open the socket, register the hotkey. No loop.
+
+        Split out from `run` so a host that already owns the main run loop -
+        the menu bar app - can drive the daemon by calling `tick`, rather than
+        the daemon insisting on owning the main thread itself.
+        """
         ipc.ensure_runtime_dir()
         if ipc.is_running():
-            print("slicer: a daemon is already running")
-            return 1
+            self._log("slicer: a daemon is already running")
+            return False
         ipc.clear_stale_socket()
 
-        self._become_accessory_app()
+        if become_app:
+            self._become_accessory_app()
         self._warm_up()
         self._start_server()
         self._install_hotkey()
+        return True
+
+    def tick(self) -> None:
+        """Run any queued main-thread work. Safe to call from a timer."""
+        self._drain_main_queue()
+
+    def run(self) -> int:
+        """Own the main thread: AppKit run loop plus the work queue."""
+        if not self.start_services():
+            return 1
 
         from AppKit import NSApplication          # noqa: PLC0415
         from Foundation import NSDate, NSRunLoop   # noqa: PLC0415
@@ -351,24 +370,55 @@ class Daemon:
 
     def _hotkey_reading(self) -> None:
         try:
-            source = self._acquire({})
+            self.begin_reading()
         except CaptureError:
-            return
+            pass
+
+    def begin_reading(self, *, follow: bool = False):
+        """Pick a region and read it. The hotkey and the menu both land here.
+
+        Runs on a worker thread; the picker and the highlight are marshalled to
+        the main thread by `_acquire` and `_show_highlight`.
+        """
+        self._announce(True, "Selecting a region…")
+        try:
+            source = self._acquire({})
+        except CaptureError as exc:
+            self._announce(False, str(exc)[:60])
+            raise
+
         state = {"capture": source}
-        state["slice"] = self.conductor.prepare(source).slice
+        try:
+            prepared = self.conductor.prepare(source)
+        except CaptureError as exc:
+            self._announce(False, str(exc)[:60])
+            raise
+        state["slice"] = prepared.slice
+        self.readings += 1
 
         def on_progress(progress):
             block = self._block_for(state, progress.utterance.block_id)
             if self.highlight and block is not None:
                 self.on_main(lambda: self._show_highlight(block, state))
 
+        self._announce(True, f"Reading {len(prepared.utterances)} blocks")
         try:
-            self.conductor.read(source, on_progress=on_progress)
-        except CaptureError:
-            pass
+            if follow:
+                return self.conductor.read_continuous(source, on_progress=on_progress)
+            return self.conductor.read(source, on_progress=on_progress)
         finally:
             if self.highlight:
                 self.on_main(self._hide_highlight)
+            self._announce(False, "Ready")
+
+    def _announce(self, reading: bool, detail: str = "") -> None:
+        if self.on_reading_state is None:
+            return
+        # State changes drive UI, so they belong on the main thread.
+        try:
+            self.on_main(lambda: self.on_reading_state(reading, detail), timeout=5)
+        except Exception:                 # noqa: BLE001
+            pass
 
     # -- teardown ----------------------------------------------------------
 

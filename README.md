@@ -9,7 +9,9 @@ normalization, and playback all run end to end on macOS with no cloud calls
 and no models.
 
 ```bash
-./bin/slicer daemon                    # resident process: 3.3x faster, plus a hotkey
+./bin/slicer menubar                   # run it as a menu bar app (recommended)
+./bin/slicer daemon                    # or headless, for a server or a test
+./bin/slicer daemon --background       # detached, logs to ~/.slicer/daemon.log
 ./bin/slicer status                    # is one running?
 ./bin/slicer doctor                    # check this machine, measure the budget
 ./bin/slicer plan --file page.png      # show what would be read, silently
@@ -80,6 +82,7 @@ slicer/
   ipc.py              newline-JSON over a Unix socket
   hotkey.py           one global hotkey, via Carbon rather than an event tap
   overlay.py          the highlight that follows the reading
+  menubar.py          the status item, and the run loop it brings with it
   editor.py           speakable text + assert_grounded
   narrator.py         speech, transport, epoch cancellation
   conductor.py        the state machine and degradation ladder
@@ -165,7 +168,7 @@ Named honestly rather than left to be discovered:
 
 ```bash
 python3 -m venv .venv
-./.venv/bin/pip install pyobjc-framework-Vision pyobjc-framework-Quartz
+./.venv/bin/pip install -r requirements.txt
 ./.venv/bin/python tests/run_all.py
 ```
 

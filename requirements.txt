@@ -1,0 +1,8 @@
+pyobjc-core==12.2.2
+pyobjc-framework-Cocoa==12.2.2
+pyobjc-framework-CoreML==12.2.2
+pyobjc-framework-Quartz==12.2.2
+pyobjc-framework-Vision==12.2.2
+pyobjc-framework-WebKit==12.2.2
+quickmachotkey==2025.7.28
+rumps==0.4.0

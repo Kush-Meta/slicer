@@ -48,6 +48,10 @@ def main(argv: list[str] | None = None) -> int:
     daemon_parser.add_argument("--background", action="store_true",
                                help="detach and log to ~/.slicer/daemon.log")
 
+    menubar_parser = sub.add_parser("menubar", help="run Slicer in the menu bar")
+    menubar_parser.add_argument("--voice")
+    menubar_parser.add_argument("--rate", type=int)
+
     sub.add_parser("status", help="is a daemon running?")
     sub.add_parser("stop", help="shut down the running daemon")
     sub.add_parser("doctor", help="check this machine and measure the latency budget")
@@ -62,6 +66,9 @@ def main(argv: list[str] | None = None) -> int:
         from .daemon import Daemon
         return Daemon(voice=args.voice, rate=args.rate,
                       highlight=not args.no_highlight).run()
+    if args.command == "menubar":
+        from .menubar import main as run_menubar
+        return run_menubar(voice=args.voice, rate=args.rate)
     if args.command == "status":
         return _status()
     if args.command == "stop":
