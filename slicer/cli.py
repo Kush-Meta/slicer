@@ -28,6 +28,7 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
 
     for name, help_text in [("read", "capture a region and read it aloud"),
+                            ("navigate", "read it, and move through it by structure"),
                             ("plan", "show what would be read, without speaking")]:
         p = sub.add_parser(name, help=help_text)
         p.add_argument("--region", help="x,y,w,h in screen points (default: drag to select)")
@@ -82,9 +83,10 @@ def main(argv: list[str] | None = None) -> int:
 
     # Prefer the resident daemon: recognition is 15x faster in a warm process.
     # Falling back in-process means the CLI always works, daemon or not.
-    forwarded = _via_daemon(args)
-    if forwarded is not None:
-        return forwarded
+    if args.command != "navigate":
+        forwarded = _via_daemon(args)
+        if forwarded is not None:
+            return forwarded
 
     from .editor import Verbosity  # noqa: PLC0415
     conductor = Conductor(
@@ -115,6 +117,9 @@ def main(argv: list[str] | None = None) -> int:
         raise
 
     _print_header(reading, args)
+
+    if args.command == "navigate":
+        return _navigate(conductor, reading, args)
 
     if args.command == "plan":
         for index, utterance in enumerate(reading.utterances, 1):
@@ -166,6 +171,33 @@ def main(argv: list[str] | None = None) -> int:
     if args.timings:
         print(f"\n{DIM}{reading.timings.render()}{RESET}")
     return 0
+
+
+def _navigate(conductor, reading, args) -> int:
+    """Interactive structural navigation - the screen reader interaction."""
+    from .interactive import HELP, Session  # noqa: PLC0415
+    from .editor import Verbosity           # noqa: PLC0415
+
+    width = max(len(keys) for keys, _ in HELP)
+    for keys, description in HELP:
+        print(f"  {CYAN}{keys:<{width}}{RESET}  {DIM}{description}{RESET}")
+    print()
+
+    def on_block(progress):
+        print(f"  {DIM}{progress.index + 1:2d}/{progress.total}{RESET} "
+              f"{progress.utterance.spoken}")
+
+    session = Session(reading.slice, conductor.narrator,
+                      verbosity=Verbosity(args.verbosity),
+                      label=reading.label, on_block=on_block)
+    try:
+        return session.run()
+    except KeyboardInterrupt:
+        conductor.narrator.stop()
+        return 0
+    except RuntimeError as exc:
+        print(f"{RED}slicer:{RESET} {exc}", file=sys.stderr)
+        return 1
 
 
 def _via_daemon(args) -> int | None:

@@ -16,12 +16,28 @@ and no models.
 ./bin/slicer doctor                    # check this machine, measure the budget
 ./bin/slicer plan --file page.png      # show what would be read, silently
 ./bin/slicer read                      # drag a region, then listen
+./bin/slicer navigate --window         # read it, then move through it by structure
+./bin/slicer read --window             # read the frontmost window, no selection
 ./bin/slicer read --follow             # keep reading as the content scrolls
 ./bin/slicer read --region 0,0,900,600 --timings
 ./.venv/bin/python scripts/verify_content_protection.py
 ```
 
-During a reading: `space` pause · `n` next block · `p` previous · `q` quit.
+During `navigate`, matching the conventions NVDA, JAWS and VoiceOver share:
+
+| key | |
+|---|---|
+| `n` / `p`, arrows | next / previous block |
+| `h` / `H` | next / previous heading |
+| `t` / `T` | next / previous table row |
+| `c` / `C`, `l` / `L` | next / previous code block, list item |
+| `,` / `.` | first / last |
+| `a` | read everything from here |
+| `r` / `s` / `w` | repeat / spell out / where am I |
+| `esc` / `q` | stop speaking / quit |
+
+Every move interrupts speech immediately, and every move that finds nothing
+says so — silence after a keypress is indistinguishable from a crash.
 With the daemon running, **cmd-ctrl-R** reads a region from anywhere, and a
 highlight follows the block being spoken.
 
@@ -83,6 +99,9 @@ slicer/
   hotkey.py           one global hotkey, via Carbon rather than an event tap
   overlay.py          the highlight that follows the reading
   menubar.py          the status item, and the run loop it brings with it
+  windows.py          naming a target instead of drawing one
+  navigator.py        structural movement: headings, tables, spelling
+  interactive.py      the key loop, kept responsive while speech runs
   editor.py           speakable text + assert_grounded
   narrator.py         speech, transport, epoch cancellation
   conductor.py        the state machine and degradation ladder
