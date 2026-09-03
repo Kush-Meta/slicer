@@ -32,7 +32,7 @@ from tests import webfixtures
 OUT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                    "docs", "demo.gif")
 
-WIDTH, HEIGHT = 940, 296
+WIDTH, HEIGHT = 940, 320
 CAPTION_H = 96
 ACCENT = (69, 191, 200)
 DIM_ALPHA = 165
