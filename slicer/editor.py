@@ -16,7 +16,23 @@ import re
 import unicodedata
 from dataclasses import dataclass
 
+from enum import Enum
+
 from .blocks import Block, BlockKind, tokenize
+
+
+class Verbosity(str, Enum):
+    """How much structure to say out loud.
+
+    A sighted reader gets structure for free from layout - a heading looks like
+    a heading. Spoken, that information is simply gone unless it is announced,
+    which is most of what separates a screen reader from a text-to-speech
+    engine. It is also the thing users tune most, so it is a setting.
+    """
+
+    OFF = "off"      # content only
+    LOW = "low"      # announce structure: headings, rows, lists, code
+    HIGH = "high"    # also announce position within the reading
 
 
 class UngroundedSpeech(RuntimeError):
@@ -63,8 +79,21 @@ class Utterance:
     def spoken(self) -> str:
         return f"{self.prefix} {self.text}".strip() if self.prefix else self.text
 
+    @classmethod
+    def narration(cls, words: str) -> "Utterance":
+        """Something Slicer says on its own account - feedback, not content.
 
-def to_speech(block: Block, *, min_confidence: float = 0.0) -> Utterance | None:
+        Carries no text, so there is nothing for the grounding check to be
+        wrong about: "no more headings" is a fact about the reading, not a
+        claim about the screen.
+        """
+        return cls(block_id="", text="", kind=BlockKind.UNKNOWN,
+                   confidence=1.0, prefix=words)
+
+
+def to_speech(block: Block, *, min_confidence: float = 0.0,
+              verbosity: Verbosity = Verbosity.LOW,
+              index: int | None = None, total: int | None = None) -> Utterance | None:
     """Render one block as something worth hearing, or None if it should not be read."""
     if block.skipped:
         return None
@@ -78,6 +107,10 @@ def to_speech(block: Block, *, min_confidence: float = 0.0) -> Utterance | None:
     if not text.strip():
         return None
 
+    announcement = describe(block, verbosity, index, total)
+    if announcement:
+        prefix = f"{announcement} {prefix}".strip()
+
     if block.confidence < min_confidence:
         # Hedging is narration, so it goes in the prefix rather than being
         # woven into words the listener will take as screen content.
@@ -88,6 +121,82 @@ def to_speech(block: Block, *, min_confidence: float = 0.0) -> Utterance | None:
     assert_grounded(text, block)
     return Utterance(block_id=block.id, text=text, kind=block.kind,
                      confidence=block.confidence, prefix=prefix, note=note)
+
+
+def spell(block: Block) -> Utterance:
+    """Read a block out one character at a time.
+
+    Screen reader users spell things constantly - to tell "l" from "1", to
+    check an identifier, to hear an unfamiliar name. Grounding is checked
+    differently here: token membership is meaningless once words are split into
+    letters, so the check is stronger instead - the letters, rejoined, must
+    reproduce the source text exactly.
+    """
+    source = _normalize(block.healed_text)
+    letters = " ".join(_spell_character(ch) for ch in source)
+    assert_spelling_grounded(letters, source)
+    return Utterance(block_id=block.id, text=letters, kind=block.kind,
+                     confidence=block.confidence, prefix="spelling,",
+                     note="spelled out")
+
+
+def _spell_character(ch: str) -> str:
+    if ch == " ":
+        return "space,"
+    if ch.isalnum():
+        return f"{ch},"
+    return f"{_PUNCTUATION.get(ch, ch)},"
+
+
+_PUNCTUATION = {
+    ".": "period", ",": "comma", "-": "dash", "_": "underscore", "/": "slash",
+    ":": "colon", ";": "semicolon", "'": "apostrophe", '"': "quote",
+    "(": "open paren", ")": "close paren", "@": "at", "#": "hash",
+    "$": "dollar", "%": "percent", "&": "and", "*": "star", "+": "plus",
+    "=": "equals", "?": "question mark", "!": "exclamation",
+}
+
+
+def assert_spelling_grounded(letters: str, source: str) -> None:
+    """The spelled letters, rejoined, must be exactly the source text."""
+    rebuilt = "".join(
+        " " if token == "space" else token
+        for token in (part.rstrip(",") for part in letters.split())
+        if len(token) == 1 or token == "space"
+    )
+    expected = "".join(ch for ch in source if ch.isalnum() or ch == " ")
+    if rebuilt != expected:
+        raise UngroundedSpeech(
+            f"spelling does not reproduce the source: {rebuilt[:60]!r} != {expected[:60]!r}"
+        )
+
+
+def describe(block: Block, verbosity: Verbosity = Verbosity.LOW,
+             index: int | None = None, total: int | None = None) -> str:
+    """The structural announcement for a block, in Slicer's own voice.
+
+    Returned separately from content and carried in `Utterance.prefix`, so it
+    is never checked against the screen - these words are Slicer's, not the
+    page's, and a listener must be able to tell which is which.
+    """
+    if verbosity == Verbosity.OFF:
+        return ""
+
+    parts: list[str] = []
+    if block.kind == BlockKind.HEADING:
+        parts.append("heading,")
+    elif block.kind == BlockKind.TABLE_ROW:
+        if block.group_size:
+            parts.append(f"row {block.index_in_group} of {block.group_size},")
+        else:
+            parts.append("row,")
+    elif block.kind == BlockKind.LIST:
+        parts.append("list item,")
+
+    if verbosity == Verbosity.HIGH and index is not None and total:
+        parts.append(f"{index} of {total},")
+
+    return " ".join(parts)
 
 
 def assert_grounded(spoken: str, block: Block,

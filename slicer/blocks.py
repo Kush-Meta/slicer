@@ -85,6 +85,10 @@ class Block:
     # Why this block was classified as it was - shown in the skip log so a
     # user can audit what Slicer decided not to read.
     reason: str = ""
+    # Position within a structure, for announcements like "row 2 of 4". A
+    # listener who cannot see the table needs this to keep their place.
+    index_in_group: int = 0
+    group_size: int = 0
 
     @property
     def text(self) -> str:

@@ -28,17 +28,28 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
 
     for name, help_text in [("read", "capture a region and read it aloud"),
+                            ("navigate", "read it, and move through it by structure"),
                             ("plan", "show what would be read, without speaking")]:
         p = sub.add_parser(name, help=help_text)
         p.add_argument("--region", help="x,y,w,h in screen points (default: drag to select)")
         p.add_argument("--file", help="read an image file instead of the screen")
-        p.add_argument("--voice", help="a macOS voice name, see: say -v '?'")
+        p.add_argument("--voice", help="a voice name; see: slicer voices")
+        p.add_argument("--speech", choices=["avspeech", "say"],
+                       help="speech backend (default: in-process avspeech)")
         p.add_argument("--rate", type=int, help="words per minute")
-        p.add_argument("--fast", action="store_true", help="faster, less accurate recognition")
+        p.add_argument("--fast", action="store_true",
+                       help="8x faster recognition, but measurably wrong "
+                            "(20%% character agreement on some pages); for benchmarking only")
         p.add_argument("--show-skipped", action="store_true", help="list what was not read")
         p.add_argument("--timings", action="store_true", help="print the stage breakdown")
         p.add_argument("--follow", action="store_true",
                        help="keep reading as the content scrolls")
+        p.add_argument("--window", action="store_true",
+                       help="read the frontmost window, no selection needed")
+        p.add_argument("--screen", action="store_true",
+                       help="read the whole display")
+        p.add_argument("--verbosity", choices=["off", "low", "high"], default="low",
+                       help="how much structure to announce (default: low)")
 
     daemon_parser = sub.add_parser("daemon", help="run the resident Slicer process")
     daemon_parser.add_argument("--voice")
@@ -52,6 +63,17 @@ def main(argv: list[str] | None = None) -> int:
     menubar_parser.add_argument("--voice")
     menubar_parser.add_argument("--rate", type=int)
 
+    settings_parser = sub.add_parser("settings", help="show or change saved preferences")
+    settings_parser.add_argument("--voice")
+    settings_parser.add_argument("--rate", type=int)
+    settings_parser.add_argument("--verbosity", choices=["off", "low", "high"])
+    settings_parser.add_argument("--highlight", choices=["on", "off"])
+    settings_parser.add_argument("--follow", choices=["on", "off"])
+    settings_parser.add_argument("--speech", choices=["avspeech", "say"])
+    settings_parser.add_argument("--reset", action="store_true",
+                                 help="forget everything and use the defaults")
+
+    sub.add_parser("voices", help="list the voices available on this Mac")
     sub.add_parser("status", help="is a daemon running?")
     sub.add_parser("stop", help="shut down the running daemon")
     sub.add_parser("doctor", help="check this machine and measure the latency budget")
@@ -69,6 +91,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "menubar":
         from .menubar import main as run_menubar
         return run_menubar(voice=args.voice, rate=args.rate)
+    if args.command == "settings":
+        return _settings(args)
+    if args.command == "voices":
+        return _voices()
     if args.command == "status":
         return _status()
     if args.command == "stop":
@@ -76,18 +102,43 @@ def main(argv: list[str] | None = None) -> int:
 
     # Prefer the resident daemon: recognition is 15x faster in a warm process.
     # Falling back in-process means the CLI always works, daemon or not.
-    forwarded = _via_daemon(args)
-    if forwarded is not None:
-        return forwarded
+    if args.command != "navigate":
+        forwarded = _via_daemon(args)
+        if forwarded is not None:
+            return forwarded
+
+    from .editor import Verbosity          # noqa: PLC0415
+    from .settings import Settings          # noqa: PLC0415
+    from .speech import backend_named       # noqa: PLC0415
+
+    prefs = Settings.load().overridden_by(args)
+    backend = backend_named(prefs.speech) if prefs.speech else None
+    narrator = Narrator(voice=prefs.voice, rate=prefs.rate, backend=backend)
+
+    # A voice that was asked for and silently swapped is worse than no voice
+    # setting at all - especially for someone who cannot see which one is in use.
+    wanted = prefs.voice
+    if wanted and hasattr(narrator.backend, "has_voice") and not narrator.backend.has_voice(wanted):
+        print(f"  {YELLOW}note{RESET} no voice named {wanted!r} on this Mac; using the "
+              f"default.\n       {DIM}See: ./bin/slicer voices{RESET}")
 
     conductor = Conductor(
-        narrator=Narrator(voice=getattr(args, "voice", None), rate=getattr(args, "rate", None)),
+        narrator=narrator,
         layout_config=LayoutConfig(),
         fast_ocr=args.fast,
+        verbosity=Verbosity(prefs.verbosity),
     )
 
+    # Two screen readers talking at once is unusable, and the user cannot see a
+    # dialog to find out why. Say it plainly before anything else happens.
+    from .windows import voiceover_running  # noqa: PLC0415
+    if voiceover_running():
+        print(f"  {YELLOW}note{RESET} VoiceOver is running. Both will speak at once.\n"
+              f"       {DIM}Silence VoiceOver with control, or use --verbosity off.{RESET}")
+
     try:
-        source = capture_for(args.region, args.file)
+        source = capture_for(args.region, args.file,
+                             window=args.window, screen=args.screen)
     except CaptureError as exc:
         return _fail(exc)
 
@@ -99,6 +150,9 @@ def main(argv: list[str] | None = None) -> int:
         raise
 
     _print_header(reading, args)
+
+    if args.command == "navigate":
+        return _navigate(conductor, reading, args)
 
     if args.command == "plan":
         for index, utterance in enumerate(reading.utterances, 1):
@@ -124,7 +178,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  {prefix} {progress.utterance.spoken}")
 
     try:
-        if args.follow:
+        if prefs.follow:
             from .continuity import accessibility_granted  # noqa: PLC0415
             if not accessibility_granted():
                 print(f"  {YELLOW}note{RESET} automatic scrolling needs Accessibility "
@@ -138,7 +192,7 @@ def main(argv: list[str] | None = None) -> int:
             for note in reading.notes:
                 print(f"  {YELLOW}note{RESET} {note}")
         else:
-            conductor.read(source, on_progress=on_progress)
+            conductor.read_responsive(source, on_progress=on_progress)
     except KeyboardInterrupt:
         conductor.narrator.stop()
         print(f"\n{DIM}stopped{RESET}")
@@ -150,6 +204,38 @@ def main(argv: list[str] | None = None) -> int:
     if args.timings:
         print(f"\n{DIM}{reading.timings.render()}{RESET}")
     return 0
+
+
+def _prefs_verbosity(args) -> str:
+    from .settings import Settings  # noqa: PLC0415
+    return Settings.load().overridden_by(args).verbosity
+
+
+def _navigate(conductor, reading, args) -> int:
+    """Interactive structural navigation - the screen reader interaction."""
+    from .interactive import HELP, Session  # noqa: PLC0415
+    from .editor import Verbosity           # noqa: PLC0415
+
+    width = max(len(keys) for keys, _ in HELP)
+    for keys, description in HELP:
+        print(f"  {CYAN}{keys:<{width}}{RESET}  {DIM}{description}{RESET}")
+    print()
+
+    def on_block(progress):
+        print(f"  {DIM}{progress.index + 1:2d}/{progress.total}{RESET} "
+              f"{progress.utterance.spoken}")
+
+    session = Session(reading.slice, conductor.narrator,
+                      verbosity=Verbosity(_prefs_verbosity(args)),
+                      label=reading.label, on_block=on_block)
+    try:
+        return session.run()
+    except KeyboardInterrupt:
+        conductor.narrator.stop()
+        return 0
+    except RuntimeError as exc:
+        print(f"{RED}slicer:{RESET} {exc}", file=sys.stderr)
+        return 1
 
 
 def _via_daemon(args) -> int | None:
@@ -164,6 +250,9 @@ def _via_daemon(args) -> int | None:
             return None
     payload = {"method": args.command,
                "params": {"region": region, "file": args.file,
+                          "window": getattr(args, "window", False),
+                          "screen": getattr(args, "screen", False),
+                          "verbosity": getattr(args, "verbosity", "low"),
                           "follow": getattr(args, "follow", False)}}
     stream = ipc.request(payload)
     if stream is None:
@@ -232,6 +321,44 @@ def _start_background(args) -> int:
     return 1
 
 
+def _settings(args) -> int:
+    from .settings import Settings  # noqa: PLC0415
+
+    current = Settings() if args.reset else Settings.load()
+    changed = bool(args.reset)
+    for name in ("voice", "rate", "verbosity", "speech"):
+        value = getattr(args, name, None)
+        if value is not None:
+            setattr(current, name, value)
+            changed = True
+    for name in ("highlight", "follow"):
+        value = getattr(args, name, None)
+        if value is not None:
+            setattr(current, name, value == "on")
+            changed = True
+
+    if changed and not current.save():
+        print(f"{RED}slicer:{RESET} could not write settings", file=sys.stderr)
+        return 1
+
+    print(f"\n{BOLD}settings{RESET}  {DIM}{'saved' if changed else 'current'}{RESET}\n")
+    for name, value in current.describe():
+        print(f"  {name:<18} {CYAN}{value}{RESET}")
+    print()
+    return 0
+
+
+def _voices() -> int:
+    from .speech import default_backend  # noqa: PLC0415
+    backend = default_backend()
+    names = backend.voice_names() if hasattr(backend, "voice_names") else []
+    print(f"\n{BOLD}{len(names)} voices{RESET}  {DIM}backend: {backend.name}{RESET}\n")
+    for row in range(0, len(names), 4):
+        print("  " + "".join(f"{n:<22}" for n in names[row:row + 4]))
+    print()
+    return 0
+
+
 def _status() -> int:
     from . import ipc  # noqa: PLC0415
     stream = ipc.request({"method": "ping"})
@@ -267,7 +394,9 @@ def _stop() -> int:
 
 def _print_header(reading, args) -> None:
     blocks = len(reading.utterances)
-    print(f"\n{BOLD}{blocks} blocks, {reading.word_count} words{RESET}"
+    label = getattr(reading, "label", "") or ""
+    target = f"{label} \u00b7 " if label else ""
+    print(f"\n{BOLD}{target}{blocks} blocks, {reading.word_count} words{RESET}"
           f"  {DIM}to first word {reading.timings.to_first_word():.0f}ms{RESET}")
     for note in reading.notes:
         print(f"  {YELLOW}note{RESET} {note}")

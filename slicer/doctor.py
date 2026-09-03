@@ -24,14 +24,15 @@ FIRST_WORD_BUDGET_MS = 900
 def run() -> int:
     print(f"\n{BOLD}slicer doctor{RESET}\n")
     failures = 0
+    capture_ms: float | None = None
 
     version = platform.mac_ver()[0]
     major = int(version.split(".")[0]) if version else 0
     _line(OK, "macOS", f"{version} ({platform.machine()})")
     if major >= 15:
-        _line(WARN, "window content protection",
-              "macOS 15+ composites all windows into one framebuffer. Verify that\n"
-              f"       {DIM}windows marked 'do not capture' really are excluded before relying on it.{RESET}")
+        _line(OK, "window content protection",
+              f"verified honoured on 15.3.1  {DIM}re-check each major release:\n"
+              f"       ./.venv/bin/python scripts/verify_content_protection.py{RESET}")
 
     try:
         import Vision  # noqa: F401
@@ -46,11 +47,14 @@ def run() -> int:
         start = time.perf_counter()
         cap = capture_region(0, 0, 400, 300, stability_check=False)
         elapsed = (time.perf_counter() - start) * 1000
-        _line(OK, "screen capture", f"{cap.width}x{cap.height}px, scale {cap.scale}x  {DIM}{elapsed:.0f}ms{RESET}")
-        os.unlink(cap.path)
+        _line(OK, "screen capture",
+              f"{cap.width}x{cap.height}px, scale {cap.scale}x  {DIM}{elapsed:.0f}ms{RESET}")
+        capture_ms = elapsed
+        cap.release()
     except Exception as exc:
         _line(BAD, "screen capture", str(exc).split("\n")[0])
         print(f"       {DIM}Grant Screen Recording to your terminal, then fully quit and reopen it.{RESET}")
+        capture_ms = None
         failures += 1
 
     ocr_ms = _check_ocr()
@@ -59,12 +63,13 @@ def run() -> int:
 
     say_ms = _check_say()
 
-    if ocr_ms is not None and say_ms is not None:
-        budget = 200 + ocr_ms + say_ms          # capture + recognize + speech start
+    if ocr_ms is not None and say_ms is not None and capture_ms is not None:
+        budget = capture_ms + ocr_ms + say_ms
         status = OK if budget <= FIRST_WORD_BUDGET_MS else WARN
         _line(status, "first-word budget",
-              f"~{budget:.0f}ms of {FIRST_WORD_BUDGET_MS}ms "
-              f"{DIM}(capture ~200 + ocr {ocr_ms:.0f} + speech start {say_ms:.0f}){RESET}")
+              f"~{budget:.0f}ms of {FIRST_WORD_BUDGET_MS}ms  "
+              f"{DIM}(capture {capture_ms:.0f} + recognise {ocr_ms:.0f} + "
+              f"speech {say_ms:.0f}, all measured){RESET}")
 
     print()
     if failures:
@@ -96,34 +101,44 @@ def _check_ocr() -> float | None:
 
 
 def _check_say() -> float | None:
-    """Separate fixed startup cost from speech duration by least squares.
+    """How long until speech actually starts.
 
-    A single short utterance cannot tell them apart - most of the wall clock is
-    the word itself. Four lengths and a line fit give an intercept that is the
-    real cost of beginning to speak.
+    Only the in-process backend can answer this directly: it exposes
+    `isSpeaking`, so the moment audio begins is observable. `say` offers no
+    such signal, and inferring its startup by fitting a line through several
+    utterance lengths turned out to be unreliable - the same method produced
+    145ms and 580ms depending only on which words were used. So `say` is
+    reported as what can actually be measured about it: the whole round trip
+    for one short word, startup and pronunciation together.
     """
-    try:
-        points: list[tuple[int, float]] = []
-        for words in (1, 4, 8, 14):
-            phrase = " ".join(["one"] * words)
-            points.append((words, min(time_to_first_audio(phrase) for _ in range(2))))
+    from .speech import AVSpeechBackend, SayBackend  # noqa: PLC0415
 
-        n = len(points)
-        sx = sum(w for w, _ in points)
-        sy = sum(ms for _, ms in points)
-        sxy = sum(w * ms for w, ms in points)
-        sxx = sum(w * w for w, _ in points)
-        denominator = n * sxx - sx * sx
-        if denominator == 0:
-            return None
-        per_word = (n * sxy - sx * sy) / denominator
-        startup = max((sy - per_word * sx) / n, 0.0)
-        _line(OK, "speech", f"startup {startup:.0f}ms, {per_word:.0f}ms per word "
-                            f"{DIM}(fitted over {n} lengths){RESET}")
-        return startup
-    except Exception as exc:
-        _line(BAD, "speech", str(exc)[:70])
-        return None
+    in_process: float | None = None
+    try:
+        backend = AVSpeechBackend()
+        in_process = min(time_to_first_audio("one", backend=backend) for _ in range(3))
+        _line(OK, "speech (in-process)",
+              f"{in_process:.0f}ms to first audio, measured  "
+              f"{DIM}pauses mid-sentence{RESET}")
+    except Exception as exc:                          # noqa: BLE001
+        _line(WARN, "speech (in-process)", str(exc)[:60])
+
+    try:
+        say = SayBackend()
+        timings = []
+        for _ in range(3):
+            start = time.perf_counter()
+            say.speak("one", voice=None, rate=None, still_current=lambda: True)
+            timings.append((time.perf_counter() - start) * 1000)
+        _line(OK, "speech (say, fallback)",
+              f"{min(timings):.0f}ms round trip for one word  "
+              f"{DIM}start not separable; cannot pause{RESET}")
+        if in_process is None:
+            in_process = min(timings)
+    except Exception as exc:                          # noqa: BLE001
+        _line(WARN, "speech (say, fallback)", str(exc)[:60])
+
+    return in_process
 
 
 def _sample_image() -> str:

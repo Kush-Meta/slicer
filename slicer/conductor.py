@@ -11,6 +11,7 @@ says why it cannot. Failing silently is the one outcome that is not allowed.
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass, field
 
 from . import capture as capture_mod
@@ -19,10 +20,18 @@ from .blocks import Block, Slice
 from .capture import Capture, CaptureError
 from .continuity import Scroller
 from .fingerprint import ReadingMemory
-from .editor import UngroundedSpeech, Utterance, to_speech
+from .editor import UngroundedSpeech, Utterance, Verbosity, to_speech
 from .layout import LayoutConfig, build_slice
 from .narrator import Narrator
 from .ocr import OcrError, recognize
+
+# The share of a capture read first, so speaking can begin before the whole
+# slice has been recognized. Cost scales with area: on a full-screen window the
+# top quarter recognizes in ~155ms against ~459ms for everything.
+SPECULATIVE_TOP = 0.25
+# Below this height the full parse is already quick enough that a second pass
+# would burn work for nothing.
+SPECULATIVE_MIN_HEIGHT = 600
 
 # Blocks below this are read with a spoken hedge rather than as fact.
 LOW_CONFIDENCE = 0.45
@@ -37,6 +46,9 @@ class Reading:
     timings: telemetry.Timings
     notes: list[str] = field(default_factory=list)
     dropped: int = 0
+    # What Slicer says it aimed at, e.g. "Safari, Quarterly Review". The only
+    # confirmation a non-visual user gets that it targeted the right thing.
+    label: str = ""
 
     @property
     def word_count(self) -> int:
@@ -46,20 +58,23 @@ class Reading:
 class Conductor:
     def __init__(self, narrator: Narrator | None = None,
                  layout_config: LayoutConfig | None = None,
-                 *, fast_ocr: bool = False):
+                 *, fast_ocr: bool = False,
+                 verbosity: Verbosity = Verbosity.LOW):
         self.narrator = narrator or Narrator()
         self.layout_config = layout_config or LayoutConfig()
         self.fast_ocr = fast_ocr
+        self.verbosity = verbosity
 
     # -- pipeline ----------------------------------------------------------
 
-    def prepare(self, source: Capture) -> Reading:
+    def prepare(self, source: Capture, *, top_fraction: float | None = None) -> Reading:
         """Capture to speakable utterances. Raises only on L4 conditions."""
         timings = telemetry.Timings()
         notes: list[str] = []
 
         with timings.stage("ocr"):
-            result = recognize(source.path, fast=self.fast_ocr)
+            result = recognize(source.source, fast=self.fast_ocr,
+                               top_fraction=top_fraction)
         if not result.lines:
             raise CaptureError(
                 "no text found in the captured region",
@@ -90,17 +105,21 @@ class Conductor:
             notes.append(f"{skipped} block(s) classified as navigation")
 
         return Reading(slice=slice_, utterances=utterances, timings=timings,
-                       notes=notes, dropped=dropped)
+                       notes=notes, dropped=dropped,
+                       label=getattr(source, "label", ""))
 
     def _render(self, slice_: Slice) -> tuple[list[Utterance], int]:
         utterances: list[Utterance] = []
         dropped = 0
-        for block in slice_.readable():
+        readable = slice_.readable()
+        for position, block in enumerate(readable, 1):
             if block.confidence < MIN_CONFIDENCE:
                 dropped += 1
                 continue
             try:
-                utterance = to_speech(block, min_confidence=LOW_CONFIDENCE)
+                utterance = to_speech(block, min_confidence=LOW_CONFIDENCE,
+                                      verbosity=self.verbosity,
+                                      index=position, total=len(readable))
             except UngroundedSpeech as exc:
                 # The invariant held and something tried to speak an invented
                 # word. Drop the block rather than the guarantee.
@@ -112,6 +131,93 @@ class Conductor:
         return utterances, dropped
 
     # -- speaking ----------------------------------------------------------
+
+    def should_speculate(self, source: Capture) -> bool:
+        return source.height >= SPECULATIVE_MIN_HEIGHT
+
+    def read_responsive(self, source: Capture, *, on_progress=None) -> Reading:
+        """Start speaking before the whole slice has been recognized.
+
+        Recognition cost scales with the area examined, and a full-screen
+        window costs ~459ms against ~155ms for its top quarter. Reading the top
+        first gets a first word out in about a fifth of the time, and the rest
+        of the slice is recognized on another thread while that first block is
+        being spoken - which takes seconds, so the handover is never heard.
+
+        Both lanes use accurate recognition. The obvious alternative, dropping
+        Vision to its fast level, is eight times quicker and measurably wrong:
+        it mangles "prose" into "PTose" and reading order comes out incorrect on
+        three of seven golden pages. Speed is bought with area, not accuracy.
+
+        Only the *first* block is spoken speculatively. It is parsed without
+        the rest of the page for context, so its reading order is less certain
+        than the full parse's - bounding that risk to one block costs almost
+        nothing and removes the failure mode entirely.
+        """
+        if not self.should_speculate(source):
+            return self.read(source, on_progress=on_progress)
+
+        deep: dict = {}
+
+        def recognize_everything() -> None:
+            try:
+                deep["reading"] = self.prepare(source)
+            except Exception as exc:      # noqa: BLE001
+                deep["error"] = exc
+
+        worker = threading.Thread(target=recognize_everything, daemon=True)
+        worker.start()
+
+        memory = ReadingMemory()
+        epoch = self.narrator.new_epoch()
+        spoken: list[Utterance] = []
+        timings = telemetry.Timings()
+
+        with timings.stage("speculative"):
+            try:
+                head = self.prepare(source, top_fraction=SPECULATIVE_TOP)
+                first = head.utterances[:1]
+            except Exception:             # noqa: BLE001
+                first = []
+                head = None
+
+        if first and head is not None:
+            by_id = {b.id: b for b in head.slice.blocks}
+            for progress in self.narrator.read(first, epoch):
+                if on_progress:
+                    on_progress(progress)
+                spoken.append(progress.utterance)
+                block = by_id.get(progress.utterance.block_id)
+                if block is not None:
+                    memory.remember(block)
+
+        worker.join()
+        if "error" in deep:
+            if spoken:
+                return Reading(slice=head.slice, utterances=spoken,
+                               timings=timings, label=source.label,
+                               notes=["only the top of the region could be read"])
+            raise deep["error"]
+
+        reading = deep["reading"]
+        reading.label = source.label
+        reading.timings.stages.update(timings.stages)
+
+        start = memory.resume_index(reading.slice.readable())
+        remaining = {b.id for b in reading.slice.readable()[start:]}
+        pending = [u for u in reading.utterances if u.block_id in remaining]
+
+        if epoch == self.narrator.epoch and pending:
+            with reading.timings.stage("speak"):
+                for progress in self.narrator.read(pending, epoch):
+                    if on_progress:
+                        on_progress(progress)
+                    spoken.append(progress.utterance)
+
+        reading.utterances = spoken or reading.utterances
+        telemetry.record({"event": "responsive_reading",
+                          "spoken": len(spoken), "stages": reading.timings.stages})
+        return reading
 
     def read(self, source: Capture, *, on_progress=None) -> Reading:
         reading = self.prepare(source)
@@ -219,10 +325,20 @@ class Conductor:
         return spoken
 
 
-def capture_for(region: str | None, file: str | None) -> Capture:
-    """Resolve the three ways a reading can be aimed."""
+def capture_for(region: str | None, file: str | None, *,
+                window: bool = False, screen: bool = False) -> Capture:
+    """Resolve the ways a reading can be aimed.
+
+    Window and screen targets exist so the tool can be aimed without sight.
+    Dragging a rectangle assumes you can see where the content is and confirm
+    the selection landed on it; naming a target assumes neither.
+    """
     if file:
         return capture_mod.capture_file(file)
+    if window:
+        return capture_mod.capture_window()
+    if screen:
+        return capture_mod.capture_display()
     if region:
         try:
             x, y, w, h = (int(part) for part in region.split(","))

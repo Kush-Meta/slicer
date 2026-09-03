@@ -167,6 +167,32 @@ def test_over_skip_guard_counts_words_not_blocks():
     assert slice_.degraded == []
 
 
+def test_a_column_beside_a_wide_subtree_is_not_deleted():
+    """Regression, and the second time this bug class appeared.
+
+    A heading that bridges two columns makes the first cut separate the third
+    column as a top-level sibling. Chrome detection then compared its width
+    against that sibling's bounding box - which spans the whole rest of the
+    page - and deleted it. Comparing median line width instead makes the test
+    a property of the content rather than of how the recursion happened to
+    split.
+
+    Reading order for this layout is still imperfect: the third column is read
+    after the table rather than as part of it. That is a known limitation, and
+    a deliberately smaller problem than losing the column entirely.
+    """
+    rows = [["Region", "Revenue", "Growth"], ["North", "4,318", "12%"],
+            ["South", "2,901", "8%"]]
+    placed = [fixtures.Placed("Regional Results", 60, 30, 30)]
+    placed += [fixtures.Placed(cell, 80 + c * 230, 110 + r * 46, 20)
+               for r, row in enumerate(rows) for c, cell in enumerate(row)]
+    slice_ = layout.build_slice(recognize(fixtures.render(placed, width=860, height=300)))
+    spoken = " ".join(b.text for b in slice_.readable())
+    for cell in ["Growth", "12%", "8%", "Region", "North", "4,318"]:
+        assert cell in spoken, f"{cell!r} was silently dropped"
+    assert slice_.skipped() == []
+
+
 def test_no_content_is_ever_silently_lost():
     """Whatever the classification, every recognized line is accounted for."""
     for path in [

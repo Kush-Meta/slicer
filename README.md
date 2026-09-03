@@ -1,177 +1,230 @@
 # Slicer
 
-Point at a region of the screen and it reads aloud — in the order a person
-would read it, not top to bottom.
+**A screen reader that reads any window aloud — in the order a person would read it.**
 
-This is v0: a working vertical slice with the architecture in place, not a
-prototype to be thrown away. Capture, recognition, reading order, speech
-normalization, and playback all run end to end on macOS with no cloud calls
-and no models.
+Slicer works from pixels, not the accessibility tree. That means it reads the
+things other screen readers cannot: PDFs in a third-party viewer, remote
+desktop sessions, canvas and Electron apps that expose nothing, video frames,
+legacy internal tools, a screenshot someone pasted into chat.
+
+Everything runs on your Mac. Nothing is uploaded, no account, no network calls
+at all — the recognition and the speech are both Apple frameworks already on
+the machine.
 
 ```bash
-./bin/slicer menubar                   # run it as a menu bar app (recommended)
-./bin/slicer daemon                    # or headless, for a server or a test
-./bin/slicer daemon --background       # detached, logs to ~/.slicer/daemon.log
-./bin/slicer status                    # is one running?
-./bin/slicer doctor                    # check this machine, measure the budget
-./bin/slicer plan --file page.png      # show what would be read, silently
-./bin/slicer read                      # drag a region, then listen
-./bin/slicer read --follow             # keep reading as the content scrolls
-./bin/slicer read --region 0,0,900,600 --timings
-./.venv/bin/python scripts/verify_content_protection.py
+./bin/slicer menubar          # run it in the menu bar, then press ⌘⌃R anywhere
+./bin/slicer navigate --window   # read the frontmost window and move around it
+./bin/slicer doctor           # check this machine and measure the latency budget
 ```
 
-During a reading: `space` pause · `n` next block · `p` previous · `q` quit.
-With the daemon running, **cmd-ctrl-R** reads a region from anywhere, and a
-highlight follows the block being spoken.
+---
 
-## What makes this different from the other read-aloud tools
+## Why it exists
 
-Several open-source tools already do drag-a-region, OCR, and speak. All of them
-sort recognized text top-to-bottom, which reads a two-column page straight
-across. Slicer's ordering is a recursive XY-cut: find a vertical gutter no line
-crosses and the region is columns, so read left fully, then right; otherwise
-find a horizontal gap and read top then bottom.
+Every screen reader walks the accessibility tree. When that tree is well-formed
+nothing beats it — it is free, instant and exactly right. The problem is how
+often it isn't there.
 
-On the demo page, naive ordering produces:
+Slicer takes the other route: treat the screen as a document. Capture pixels,
+recover layout, infer reading order, speak. That buys universality, and costs
+two things this project is mostly about.
+
+**Reading order is the hard problem, not OCR.** Text recognition is a
+commodity. What no recognizer gives you is the answer to *what comes next* on a
+screen with a sidebar, a sticky header, a two-column article and a floating
+chat bubble. Sorting recognized text top-to-bottom reads a two-column page
+straight across, which is what every simple read-aloud tool does:
 
 > A second column of body **Reading order is the hard** text that should be
 > read **problem here, not the text**…
 
-and Slicer produces the two columns in full, in order. That difference is the
-product.
+Slicer uses a recursive XY-cut: find a vertical gutter no line crosses and the
+region is columns, so read left fully then right; otherwise find a horizontal
+gap and read top then bottom. It is deterministic and cannot hallucinate,
+because it only ever permutes the lines it was given.
 
-The method is deterministic and needs no model. That is a deliberate trade: a
-reader that orders the same screen differently twice loses trust faster than
-one that is consistently a little wrong.
+**Latency is the other.** A reader that takes a second to start talking feels
+dead. Slicer speaks the first word in about 150 ms by recognizing the top of
+the capture first and reading the rest on another thread.
 
-## The invariant
+## The rule everything else defers to
 
-**No model may author words that get spoken.** Every word of content traces
-back to a token recognition actually found on screen, and `assert_grounded`
-enforces it on every block of every reading — in the live path, not in tests.
+> **No model may author words that get spoken.**
 
-Anything Slicer generates itself — a line count, a hedge like "unclear", an
-announcement — lives in `Utterance.prefix`, structurally separate from
-`Utterance.text`. The listener can tell narration from content, and the check
-applies only to content.
+Every word of content traces back to a token recognition actually found on
+screen, checked on every block of every reading — in the live path, not in
+tests. Anything Slicer says on its own account (a heading announcement, "row 2
+of 4", "unclear") lives in a separate field, so a listener can always tell the
+tool's voice from the screen's.
 
-This is load-bearing before any model exists, which is the point. It caught two
-real bugs during this build: dehyphenation producing a word in no source token,
-and a generated line count being concatenated into content. When a vision model
-joins the parse stage, the guarantee is already in place rather than being
-retrofitted after the first confidently-spoken hallucination.
+This is load-bearing before any model exists, which is the point. It has
+already caught real bugs: dehyphenation producing a word in no source token, a
+generated line count concatenated into content, and unicode normalization
+silently dropping whole paragraphs.
 
-It also bounds prompt injection. Screen text is attacker-controlled on any web
-page; because planning can only emit block references, the worst a malicious
-block achieves is hiding itself — which the skip log makes visible.
+## Using it
 
-## Layout
+### In the menu bar
 
-```
-bin/slicer            launcher (uses the project venv)
-slicer/
-  blocks.py           the grounded data model — TextLine, Block, Slice
-  capture.py          screen capture + uniform-frame and stability checks
-  ocr.py              Apple Vision recognition, boxes flipped to top-left
-  layout.py           XY-cut ordering, paragraph grouping, classification
-  picker.py           the region picker, and the coordinates it returns
-  fingerprint.py      character 5-gram line fingerprints for continuity
-  continuity.py       scrolling, and where to resume afterwards
-  daemon.py           the resident process; AppKit on main, sockets off it
-  ipc.py              newline-JSON over a Unix socket
-  hotkey.py           one global hotkey, via Carbon rather than an event tap
-  overlay.py          the highlight that follows the reading
-  menubar.py          the status item, and the run loop it brings with it
-  editor.py           speakable text + assert_grounded
-  narrator.py         speech, transport, epoch cancellation
-  conductor.py        the state machine and degradation ladder
-  telemetry.py        stage timings to ~/.slicer/telemetry.jsonl
-  doctor.py           environment checks and the latency budget
-tests/
-  fixtures.py         synthetic pages whose correct reading order is known
-  webfixtures.py      real HTML rendered by WebKit, via a subprocess
-  golden.py           the golden set: seven pages with known reading order
-  test_slicer.py      model, layout, editor and capture
-  test_narrator.py    epochs, transport, cancellation
-  test_conductor.py   pipeline error paths
-  test_picker.py      coordinate conversion and selection
-  test_fingerprint.py OCR-tolerant matching
-  test_continuity.py  reading past the fold, via simulated scroll
-  test_golden.py      the WebKit corpus
-  run_all.py          runs every suite; no external test runner needed
+```bash
+./bin/slicer menubar
 ```
 
-`ENGINEERING_LOG.md` records how this was built and every bug found while
-testing it, with root causes.
+Look for **◉**. Press **⌘⌃R** from any application, drag a region, and it
+reads — with a highlight following the block being spoken. The hotkey uses
+Carbon's `RegisterEventHotKey`, which needs no Accessibility permission and
+only ever sees that one combination.
 
-## Design documents
+### Reading and navigating
 
-Three companion documents, in the order they were written:
+```bash
+./bin/slicer read --window            # read the frontmost window
+./bin/slicer read --follow            # keep reading as the content scrolls
+./bin/slicer navigate --window        # read it, then move through it
+./bin/slicer plan --window            # show what would be read, silently
+```
 
-- **[Architecture brief](https://claude.ai/code/artifact/463d9a13-ea5b-4a29-92df-03603974553c)**
-  — the original design: the agent graph, the fast/deep lane split, and the
-  latency argument. Written before any code.
-- **[Pre-mortem](https://claude.ai/code/artifact/4090e45b-0de3-4223-96ce-c86cae847723)**
-  — 63 failure modes, the grounding invariant, and lessons from nine
-  open-source projects that hit these walls first.
-- **[Internals](https://claude.ai/code/artifact/93f2e045-4032-46ce-9f77-cc0855cd2174)**
-  — how it actually works now: the nine stages, the daemon's thread
-  architecture, the three coordinate spaces, and the reasoning behind each
-  fork in the road.
+During `navigate`, matching the conventions NVDA, JAWS and VoiceOver share:
 
-## Measured on this machine (M-series, macOS 15.3.1)
+| key | |
+|---|---|
+| `n` / `p`, arrows | next / previous block |
+| `h` / `H` | next / previous heading |
+| `t` / `T` | next / previous table row |
+| `c` / `C`, `l` / `L` | next / previous code block, list item |
+| `,` / `.` | first / last |
+| `a` | read everything from here |
+| `r` / `s` / `w` | repeat / spell out / where am I |
+| `esc` / `q` | stop speaking / quit |
+
+Every move interrupts speech immediately, and every move that finds nothing
+says so — silence after a keypress is indistinguishable from a crash.
+
+### Preferences
+
+```bash
+./bin/slicer settings                       # show what is saved
+./bin/slicer settings --voice Alice --rate 200 --verbosity high
+./bin/slicer voices                         # what this Mac can speak with
+```
+
+Verbosity controls how much structure is announced. A sighted reader gets
+structure free from layout; spoken, it is gone unless someone says it.
+
+### The resident process
+
+```bash
+./bin/slicer daemon --background   # or just use the menu bar
+./bin/slicer status
+./bin/slicer stop
+```
+
+Recognition costs about 460 ms in a cold process and 155 ms in a warm one, so
+a resident process makes every reading after the first much faster.
+
+## Measured on an M-series Mac, macOS 15.3
 
 | Stage | Cold | Warm |
 |---|---|---|
-| Capture (400×300) | 96 ms | 96 ms |
-| Recognition, one line | 484 ms | **33 ms** |
-| Recognition, full page | 440 ms | **116 ms** |
-| A whole `plan`, end to end | 532 ms | **161 ms** |
-| Speech startup | — | ~145 ms |
+| Capture, full screen | 90 ms | **14 ms** |
+| Recognition, whole window | 459 ms | 459 ms |
+| Recognition, top quarter | — | **155 ms** |
+| Layout and ordering | <1 ms | <1 ms |
+| Speech, to first audio | — | **5–14 ms** |
+| **First spoken word** | 709 ms | **154 ms** |
 
-Almost all of the cold cost is loading the Vision framework, paid once per
-process. That is what the daemon is for, and end to end it makes a reading
-**3.3× faster** — comfortably inside the 900 ms first-word budget rather than
-scraping against it.
+Capture is in-process CoreGraphics rather than the `screencapture` binary, and
+pixels go straight to Vision without ever becoming a file. Speaking starts from
+the top quarter of the capture while the rest is recognized in parallel.
 
-## Deliberately not built yet
+Two optimisations were measured and rejected. Vision's *fast* recognition level
+is eight times quicker and unusable — character agreement as low as 20%,
+reading order wrong on three of seven test pages, `prose` recognized as
+`PTose`. And `minimumTextHeight`, which Apple documents as downsizing the input
+to save time, made no difference here. Speed is bought with area, not accuracy.
 
-Named honestly rather than left to be discovered:
+## How it is put together
 
-- **The deep lane.** No Docling, no vision model. XY-cut handles columns well
-  and will struggle on dense application chrome.
-- **A menu bar presence.** The daemon runs headless; `rumps` is the intended
-  shell for a status item and a visible state.
-- **Accessibility tree.** Should come before the deep lane — it is the cheapest
-  accuracy win available, and screenpipe reaches for it first at scale.
-- **Interactive-capture coordinates.** `screencapture -i` does not report the
-  chosen rectangle, so blocks cannot yet be mapped back to the display for
-  highlighting.
-- **Saved slices**, the floating widget, and the metrics dashboard.
+```
+bin/slicer              launcher (uses the project venv)
+slicer/
+  blocks.py             the grounded data model — TextLine, Block, Slice
+  capture.py            capture, and the checks that stop silent failure
+  windows.py            naming a target instead of drawing one
+  picker.py             the drag overlay, and the coordinates it returns
+  ocr.py                Apple Vision, boxes flipped to a top-left origin
+  layout.py             XY-cut ordering, grouping, classification
+  editor.py             speakable text, and assert_grounded
+  speech.py             in-process synthesis, with say(1) as a fallback
+  narrator.py           scheduling, transport, epoch cancellation
+  navigator.py          structural movement: headings, tables, spelling
+  interactive.py        the key loop, kept responsive while speech runs
+  conductor.py          the state machine and the degradation ladder
+  fingerprint.py        line fingerprints for reading past the fold
+  continuity.py         scrolling, and where to resume afterwards
+  daemon.py / ipc.py    the resident process; AppKit on main, sockets off it
+  hotkey.py             one global hotkey, via Carbon rather than an event tap
+  overlay.py            the highlight that follows the reading
+  menubar.py            the status item, and the run loop it brings with it
+  settings.py           preferences that survive a restart
+tests/                  146 tests across 15 suites, no external runner needed
+```
 
-## Known limits
+Run everything with `./.venv/bin/python tests/run_all.py`.
 
-- Epoch cancellation is tested through a fake speech backend, not live audio.
-  A race that only appears with real `say` process timing would not be caught.
-- No non-Latin script is in the test corpus.
-- Paused readings restart the current block rather than resuming mid-utterance,
-  because `say` cannot be resumed. Moving to AVSpeechSynthesizer in-process
-  fixes this and removes the ~145 ms spawn cost.
-- The doctor's speech figure is a least-squares fit over four utterance lengths;
-  expect a spread of tens of milliseconds between runs.
-- Screen Recording permission belongs to the **terminal** running Slicer. A
-  standalone `.app` will need a Developer ID certificate — macOS 15 refuses
-  ad-hoc-signed binaries for screen capture.
+The test corpus is deliberately two things: synthetic pages drawn at known
+coordinates, where ground truth is exact, and **golden pages rendered by
+WebKit**, so reading order is tested against real CSS layout rather than my own
+assumptions. Two bugs were only ever visible on the second kind.
+
+`ENGINEERING_LOG.md` records how this was built and every bug found while
+testing it, with root causes — including several that produced silent data
+loss and one measurement that turned out to be wrong.
 
 ## Setup
 
 ```bash
+git clone https://github.com/Kush-Meta/slicer.git
+cd slicer
 python3 -m venv .venv
 ./.venv/bin/pip install -r requirements.txt
 ./.venv/bin/python tests/run_all.py
+./bin/slicer doctor
 ```
 
-Grant Screen Recording to your terminal in System Settings → Privacy &
-Security, then fully quit and reopen it. macOS does not apply the grant to a
-running process.
+Grant **Screen Recording** to the terminal running Slicer, in System Settings →
+Privacy & Security. macOS does not apply the grant to a running process, so
+fully quit and reopen the terminal afterwards.
+
+Requires macOS 14+ and Apple Silicon or Intel with the Vision framework. There
+is no model to download.
+
+## Privacy
+
+Slicer captures the screen, so it is worth being exact about what that means.
+
+- **Nothing leaves the machine.** There are no network calls in the codebase.
+  Recognition and speech are Apple frameworks running locally.
+- **Nothing is stored** unless you ask. Live captures keep pixels in memory and
+  never write a file.
+- **Telemetry is local**, in `~/.slicer/`, and is stage timings only.
+- On macOS 15.3.1, windows marked `NSWindowSharingNone` — the flag password
+  managers use — are correctly excluded from capture. `scripts/verify_content_protection.py`
+  re-checks this, and should be re-run on every major OS release.
+
+## Known limits
+
+- macOS only. The capture layer is platform-specific; everything above it is not.
+- No deep parse yet. XY-cut handles documents and columns well and will
+  struggle on dense application chrome.
+- The accessibility tree is not used at all. It is the cheapest accuracy win
+  still on the table.
+- Cancellation is tested through a fake speech backend, not live audio timing.
+- No non-Latin script is in the test corpus, so multilingual support is
+  unclaimed even though Vision supports many.
+- Continuity is validated against cropped pages, not a real application with
+  momentum scrolling.
+
+## Licence
+
+MIT. See `LICENSE`.

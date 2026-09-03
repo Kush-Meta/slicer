@@ -271,6 +271,8 @@ class Daemon:
         self.readings += 1
 
         if method == "plan":
+            from .editor import Verbosity  # noqa: PLC0415
+            self.conductor.verbosity = Verbosity(params.get("verbosity", "low"))
             reading = self.conductor.prepare(source)
             ipc.send_line(client, {
                 "ok": True, "blocks": [
@@ -303,7 +305,7 @@ class Daemon:
             )
         else:
             reading_state["slice"] = self.conductor.prepare(source).slice
-            reading = self.conductor.read(source, on_progress=on_progress)
+            reading = self.conductor.read_responsive(source, on_progress=on_progress)
         if self.highlight:
             self.on_main(self._hide_highlight)
         ipc.send_line(client, {
@@ -319,11 +321,24 @@ class Daemon:
             self.narrator.stop()
 
     def _acquire(self, params: dict):
+        """Resolve what to read.
+
+        Order matters: an explicit target must win over the picker. Forgetting
+        to forward `window` and `screen` from the client made every such
+        request fall through to the picker, which then waited forever for a
+        drag nobody was there to make.
+        """
         if params.get("file"):
             return capture_file(params["file"])
         region = params.get("region")
         if region:
             return capture_region(*region)
+        if params.get("window"):
+            from .capture import capture_window  # noqa: PLC0415
+            return capture_window()
+        if params.get("screen"):
+            from .capture import capture_display  # noqa: PLC0415
+            return capture_display()
         # Picking a region needs a window, so it must happen on the main thread.
         from .capture import capture_interactive  # noqa: PLC0415
         return self.on_main(capture_interactive)
@@ -405,7 +420,7 @@ class Daemon:
         try:
             if follow:
                 return self.conductor.read_continuous(source, on_progress=on_progress)
-            return self.conductor.read(source, on_progress=on_progress)
+            return self.conductor.read_responsive(source, on_progress=on_progress)
         finally:
             if self.highlight:
                 self.on_main(self._hide_highlight)

@@ -21,6 +21,14 @@ from dataclasses import dataclass
 
 SCREENCAPTURE = "/usr/sbin/screencapture"
 
+# Capturing through the screencapture binary costs ~90ms, nearly all of it
+# process spawn. CoreGraphics does the same job in ~9ms in this process.
+# CGWindowListCreateImage is marked obsoleted in the macOS 15 SDK - the
+# replacement, ScreenCaptureKit, is asynchronous and a much larger change - but
+# the C entry point is still present and working. It is used when it works and
+# falls back to the binary when it does not, which is checked once and cached.
+_in_process_capture: bool | None = None
+
 # Below this luminance spread across sampled pixels, the frame carries no
 # image. In practice a real screen region is far above it and a permission
 # failure is at or near zero.
@@ -37,9 +45,13 @@ class CaptureError(RuntimeError):
 
 @dataclass
 class Capture:
-    path: str
-    width: int          # pixels
-    height: int         # pixels
+    path: str = ""
+    width: int = 0      # pixels
+    height: int = 0     # pixels
+    # A live capture keeps its pixels in memory: encoding a full-screen PNG
+    # costs more than taking the picture. `path` stays for fixtures, for
+    # replaying a saved capture, and for anything that wants a file.
+    image: object = None
     origin_x: int = 0   # screen points
     origin_y: int = 0
     scale: float = 1.0
@@ -49,6 +61,22 @@ class Capture:
     # the origin is known, so the same region can be captured again after a
     # scroll and blocks can be mapped back onto the display.
     region: tuple[int, int, int, int] | None = None
+    # What Slicer says it is about to read - "Safari, Quarterly Review". For a
+    # non-visual user this is the only confirmation that it aimed correctly.
+    label: str = ""
+
+    @property
+    def source(self):
+        """What to hand recognition: the pixels if we have them, else the file."""
+        return self.image if self.image is not None else self.path
+
+    def release(self) -> None:
+        """Drop a temporary file, if this capture made one."""
+        if self.path and self.image is None:
+            return                        # a caller-owned file; leave it alone
+        if self.path:
+            _cleanup(self.path)
+            self.path = ""
 
     def recapture(self) -> "Capture":
         """Capture the same rectangle again."""
@@ -62,17 +90,18 @@ def capture_region(x: int, y: int, w: int, h: int, *, stability_check: bool = Tr
     if w <= 0 or h <= 0:
         raise CaptureError(f"region has no area: {w}x{h}")
 
-    path = _run_screencapture(["-R", f"{x},{y},{w},{h}"])
-    width, height = _image_size(path)
-    _assert_has_content(path)
+    image, path = _capture_pixels(x, y, w, h)
+    width, height = (_image_dimensions(image) if image is not None
+                     else _image_size(path))
+    _assert_has_content(image if image is not None else path)
 
     scale = round(width / w, 3) if w else 1.0
     stable = True
-    if stability_check:
+    if stability_check and path:
         stable = _is_stable(["-R", f"{x},{y},{w},{h}"], path)
 
     return Capture(
-        path=path, width=width, height=height,
+        path=path, image=image, width=width, height=height,
         origin_x=x, origin_y=y, scale=scale, origin_known=True, stable=stable,
         region=(x, y, w, h),
     )
@@ -93,6 +122,43 @@ def capture_interactive() -> Capture:
     return capture_region(region.x, region.y, region.w, region.h)
 
 
+def capture_window(window=None, *, stability_check: bool = False) -> Capture:
+    """Capture a whole window, no selection required.
+
+    This is the primary aiming model for non-visual use: you say "read this
+    window" rather than drawing a rectangle around it.
+    """
+    from .windows import frontmost_window  # noqa: PLC0415
+
+    window = window or frontmost_window()
+    if window is None:
+        raise CaptureError(
+            "no window found to read",
+            remedy="Bring an application window to the front and try again.",
+        )
+    capture = capture_region(*window.region, stability_check=stability_check)
+    capture.label = window.label
+    return capture
+
+
+def capture_display(index: int = 0, *, stability_check: bool = False) -> Capture:
+    """Capture a whole display, for when the content spans windows."""
+    from AppKit import NSScreen  # noqa: PLC0415
+
+    screens = NSScreen.screens()
+    if not screens:
+        raise CaptureError("no display found")
+    screen = screens[min(index, len(screens) - 1)]
+    frame = screen.frame()
+    top = max(s.frame().origin.y + s.frame().size.height for s in screens)
+    x = int(frame.origin.x)
+    y = int(top - (frame.origin.y + frame.size.height))
+    capture = capture_region(x, y, int(frame.size.width), int(frame.size.height),
+                             stability_check=stability_check)
+    capture.label = "the screen"
+    return capture
+
+
 def capture_file(path: str) -> Capture:
     """Read an existing image. Used by tests and by the golden set."""
     if not os.path.exists(path):
@@ -102,6 +168,28 @@ def capture_file(path: str) -> Capture:
 
 
 # --------------------------------------------------------------------------
+
+
+def _capture_pixels(x: int, y: int, w: int, h: int):
+    """Fastest available capture. Returns (image, path) - one of them is set."""
+    global _in_process_capture
+    if _in_process_capture is not False:
+        try:
+            import Quartz  # noqa: PLC0415
+
+            image = Quartz.CGWindowListCreateImage(
+                Quartz.CGRectMake(x, y, w, h),
+                Quartz.kCGWindowListOptionOnScreenOnly,
+                Quartz.kCGNullWindowID,
+                Quartz.kCGWindowImageDefault,
+            )
+            if image is not None and Quartz.CGImageGetWidth(image) > 0:
+                _in_process_capture = True
+                return image, ""
+        except Exception:                 # noqa: BLE001
+            pass
+        _in_process_capture = False
+    return None, _run_screencapture(["-R", f"{x},{y},{w},{h}"])
 
 
 def _run_screencapture(args: list[str], *, allow_cancel: bool = False) -> str:
@@ -138,9 +226,14 @@ def _image_size(path: str) -> tuple[int, int]:
     return Quartz.CGImageGetWidth(image), Quartz.CGImageGetHeight(image)
 
 
-def _assert_has_content(path: str) -> None:
+def _image_dimensions(image) -> tuple[int, int]:
+    import Quartz  # noqa: PLC0415
+    return Quartz.CGImageGetWidth(image), Quartz.CGImageGetHeight(image)
+
+
+def _assert_has_content(source) -> None:
     """A uniform frame means the pixels never arrived, not that the screen is blank."""
-    variance = _luminance_variance(path)
+    variance = _luminance_variance(source)
     if variance < UNIFORM_FRAME_VARIANCE:
         raise CaptureError(
             f"capture is a uniform frame (luminance variance {variance:.2f})",
@@ -148,13 +241,18 @@ def _assert_has_content(path: str) -> None:
         )
 
 
-def _luminance_variance(path: str, samples: int = 40) -> float:
+def _luminance_variance(source, samples: int = 40) -> float:
     """Sample a grid of pixels and return the standard deviation of luminance."""
     import Quartz  # noqa: PLC0415
-    from Foundation import NSURL  # noqa: PLC0415
 
-    source = Quartz.CGImageSourceCreateWithURL(NSURL.fileURLWithPath_(path), None)
-    image = Quartz.CGImageSourceCreateImageAtIndex(source, 0, None)
+    if isinstance(source, str):
+        from Foundation import NSURL  # noqa: PLC0415
+
+        handle = Quartz.CGImageSourceCreateWithURL(
+            NSURL.fileURLWithPath_(source), None)
+        image = Quartz.CGImageSourceCreateImageAtIndex(handle, 0, None)
+    else:
+        image = source
     width = Quartz.CGImageGetWidth(image)
     height = Quartz.CGImageGetHeight(image)
     bytes_per_row = Quartz.CGImageGetBytesPerRow(image)

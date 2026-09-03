@@ -110,15 +110,27 @@ class ReadingMemory:
     def resume_index(self, blocks: list[Block], threshold: float = SAME_BLOCK) -> int:
         """Index of the first block not yet read.
 
-        The *last* familiar block wins rather than the first, so a sticky header
-        repeated at the top of every screen does not send the reading back to
-        the start.
+        Matched as an *ordered overlap*, not as set membership. Testing each
+        block independently looks reasonable and is wrong: screens are full of
+        near-identical lines - table rows, log lines, list items, repeated
+        labels - and "Paragraph 1 with some words" scores above threshold
+        against "Paragraph 3 with some words" because they differ by one
+        character. Every block then looks already-read and the rest of the page
+        is silently skipped.
+
+        What continuity actually means is that the tail of what has been spoken
+        reappears at the head of what is now on screen. So the longest such
+        run is what is looked for, and duplicates cannot fake it unless they
+        genuinely appear in the same sequence.
         """
-        last_seen = -1
-        for index, block in enumerate(blocks):
-            if self.has_seen(block, threshold):
-                last_seen = index
-        return last_seen + 1
+        if not self.spoken or not blocks:
+            return 0
+        prints = [shingles(block.text) for block in blocks]
+        for length in range(min(len(self.spoken), len(prints)), 0, -1):
+            tail = self.spoken[-length:]
+            if all(similarity(tail[i], prints[i]) >= threshold for i in range(length)):
+                return length
+        return 0
 
     def overlap(self, blocks: list[Block], threshold: float = SAME_BLOCK) -> float:
         """Share of these lines that have already been read."""
