@@ -38,6 +38,11 @@ class LayoutConfig:
     gutter_min_height_mult: float = 1.5
     # A horizontal gap this much taller than a line ends a band.
     row_gap_mult: float = 0.6
+    # How much wider a gutter must become after a horizontal cut before that
+    # cut is judged the more significant division. Swept against the whole
+    # suite: 1.5 fires on ordinary prose columns and breaks them, 2.0 through
+    # 3.0 all pass everything, so 2.5 sits in the middle of the safe range.
+    lookahead_gain: float = 2.5
     # Consecutive lines closer than this join into one paragraph.
     paragraph_gap_mult: float = 1.7
 
@@ -62,8 +67,9 @@ class LayoutConfig:
     # longest line in the group is what actually has to be short.
     table_max_median_words: float = 3.0
     table_max_line_words: int = 4
-    # Every row of a grid is complete, except possibly the last. Allowing ragged
-    # rows let a nav column and a body column be read as interleaved pairs.
+    # Every row of a grid is complete, except possibly the last. Allowing a
+    # ragged row anywhere let a heading above a table become "row 1 of 4", and
+    # allowing many let a nav column and a body column be read as pairs.
     table_allow_ragged_rows: int = 1
 
     # A line taller than the page median by this much is a heading.
@@ -125,12 +131,30 @@ def _partition(lines: list[TextLine], cfg: LayoutConfig,
         return region
 
     median_h = statistics.median(line.box.h for line in lines) or 1
+    gutter_floor = max(cfg.gutter_min_width_frac * max(box.w, 1),
+                       cfg.gutter_min_height_mult * median_h)
 
-    gutter = _widest_gap(
-        [(line.box.x, line.box.x2) for line in lines],
-        minimum=max(cfg.gutter_min_width_frac * max(box.w, 1),
-                    cfg.gutter_min_height_mult * median_h),
-    )
+    gutter = _widest_gap([(line.box.x, line.box.x2) for line in lines],
+                         minimum=gutter_floor)
+    band = _widest_gap([(line.box.y, line.box.y2) for line in lines],
+                       minimum=cfg.row_gap_mult * median_h)
+
+    # A heading above columns merges with whichever column it starts over, and
+    # that hides the real gutter: the cut lands between the heading's right
+    # edge and the next column instead of between the columns themselves. One
+    # step of lookahead settles it - if cutting horizontally first exposes a
+    # materially wider gutter underneath, the horizontal division was the more
+    # significant one.
+    if gutter is not None and band is not None:
+        cut = (band[0] + band[1]) / 2
+        below = [ln for ln in lines if ln.box.cy >= cut]
+        if len(below) > 1:
+            revealed = _widest_gap([(ln.box.x, ln.box.x2) for ln in below],
+                                   minimum=gutter_floor)
+            here = gutter[1] - gutter[0]
+            if revealed is not None and (revealed[1] - revealed[0]) > here * cfg.lookahead_gain:
+                gutter = None            # take the horizontal cut instead
+
     if gutter is not None:
         cut = (gutter[0] + gutter[1]) / 2
         left = [ln for ln in lines if ln.box.cx < cut]
@@ -140,10 +164,6 @@ def _partition(lines: list[TextLine], cfg: LayoutConfig,
             region.children = [_partition(left, cfg, "v"), _partition(right, cfg, "v")]
             return region
 
-    band = _widest_gap(
-        [(line.box.y, line.box.y2) for line in lines],
-        minimum=cfg.row_gap_mult * median_h,
-    )
     if band is not None:
         cut = (band[0] + band[1]) / 2
         top = [ln for ln in lines if ln.box.cy < cut]
@@ -346,8 +366,14 @@ def _as_table(region: Region, median_h: float,
             row[index] = line
         grid.append(row)
 
-    ragged = sum(1 for row in grid if len(row) != len(columns))
-    if ragged > cfg.table_allow_ragged_rows:
+    # Only a trailing row may be incomplete. A ragged row at the start or in
+    # the middle is evidence this is not a grid at all - most often it is a
+    # heading sitting above a table, which was otherwise absorbed and
+    # announced as "row 1 of 4".
+    for row in grid[:-1]:
+        if len(row) != len(columns):
+            return None
+    if len(grid[-1]) != len(columns) and len(grid) <= cfg.table_min_rows:
         return None
 
     return [[row.get(index) for index in range(len(columns))] for row in grid]
@@ -362,7 +388,8 @@ def _emit_table(rows: list[list[TextLine | None]], counter: _Counter) -> list[Bl
         if not lines:
             continue
         blocks.append(Block(id=counter.next(), lines=lines, kind=BlockKind.TABLE_ROW,
-                            reason=f"row {number} of a {width}-column grid"))
+                            reason=f"row {number} of a {width}-column grid",
+                            index_in_group=number, group_size=len(rows)))
     return blocks
 
 
@@ -371,12 +398,15 @@ def _emit_table(rows: list[list[TextLine | None]], counter: _Counter) -> list[Bl
 
 def _is_chrome(region: Region, siblings: list[Region], index: int,
                page_width: int, cfg: LayoutConfig) -> tuple[bool, str]:
-    """A narrow column of short labels at a margin, beside ordinary columns.
+    """A narrow column of short labels at a margin, beside ordinary content.
 
-    Every clause exists because dropping it produced silent data loss in
-    testing. In particular the comparison is against the *median* sibling
-    width, not the widest: a nested subtree spanning two columns is not
-    evidence that this column is a sidebar.
+    The comparison is against the median *line width* elsewhere, not against a
+    sibling's bounding box. That distinction has now caused the same bug twice:
+    a sibling is often a subtree spanning several columns, so its box is far
+    wider than any real column, and any genuinely narrow column measured
+    against it looks like a sidebar and is silently deleted. Text extent is a
+    property of the content; a bounding box is an artefact of how the cut
+    happened to recurse.
     """
     if index not in (0, len(siblings) - 1):
         return False, ""                 # navigation sits at a margin
@@ -386,11 +416,16 @@ def _is_chrome(region: Region, siblings: list[Region], index: int,
     if region.box.w > cfg.chrome_max_width_frac * page_width:
         return False, ""
 
-    others = [s.box.w for i, s in enumerate(siblings) if i != index]
+    others: list[int] = []
+    for position, sibling in enumerate(siblings):
+        if position != index:
+            others.extend(line.box.w for line in sibling.all_lines())
     if not others:
         return False, ""
+
+    mine = statistics.median(line.box.w for line in lines)
     reference = statistics.median(others)
-    if region.box.w * cfg.chrome_min_sibling_ratio > reference:
+    if mine * cfg.chrome_min_sibling_ratio > reference:
         return False, ""
 
     median_words = statistics.median(len(ln.text.split()) for ln in lines)
@@ -400,9 +435,8 @@ def _is_chrome(region: Region, siblings: list[Region], index: int,
         return False, ""                 # navigation labels are not sentences
 
     return True, (
-        f"narrow edge column ({region.box.w}px, {region.box.w / max(page_width, 1):.0%} "
-        f"of width) beside columns averaging {reference:.0f}px, median "
-        f"{median_words:.0f} words per line, no sentence punctuation"
+        f"narrow edge column: lines average {mine:.0f}px against {reference:.0f}px "
+        f"elsewhere, median {median_words:.0f} words per line, no sentence punctuation"
     )
 
 

@@ -16,7 +16,23 @@ import re
 import unicodedata
 from dataclasses import dataclass
 
+from enum import Enum
+
 from .blocks import Block, BlockKind, tokenize
+
+
+class Verbosity(str, Enum):
+    """How much structure to say out loud.
+
+    A sighted reader gets structure for free from layout - a heading looks like
+    a heading. Spoken, that information is simply gone unless it is announced,
+    which is most of what separates a screen reader from a text-to-speech
+    engine. It is also the thing users tune most, so it is a setting.
+    """
+
+    OFF = "off"      # content only
+    LOW = "low"      # announce structure: headings, rows, lists, code
+    HIGH = "high"    # also announce position within the reading
 
 
 class UngroundedSpeech(RuntimeError):
@@ -64,7 +80,9 @@ class Utterance:
         return f"{self.prefix} {self.text}".strip() if self.prefix else self.text
 
 
-def to_speech(block: Block, *, min_confidence: float = 0.0) -> Utterance | None:
+def to_speech(block: Block, *, min_confidence: float = 0.0,
+              verbosity: Verbosity = Verbosity.LOW,
+              index: int | None = None, total: int | None = None) -> Utterance | None:
     """Render one block as something worth hearing, or None if it should not be read."""
     if block.skipped:
         return None
@@ -78,6 +96,10 @@ def to_speech(block: Block, *, min_confidence: float = 0.0) -> Utterance | None:
     if not text.strip():
         return None
 
+    announcement = describe(block, verbosity, index, total)
+    if announcement:
+        prefix = f"{announcement} {prefix}".strip()
+
     if block.confidence < min_confidence:
         # Hedging is narration, so it goes in the prefix rather than being
         # woven into words the listener will take as screen content.
@@ -88,6 +110,34 @@ def to_speech(block: Block, *, min_confidence: float = 0.0) -> Utterance | None:
     assert_grounded(text, block)
     return Utterance(block_id=block.id, text=text, kind=block.kind,
                      confidence=block.confidence, prefix=prefix, note=note)
+
+
+def describe(block: Block, verbosity: Verbosity = Verbosity.LOW,
+             index: int | None = None, total: int | None = None) -> str:
+    """The structural announcement for a block, in Slicer's own voice.
+
+    Returned separately from content and carried in `Utterance.prefix`, so it
+    is never checked against the screen - these words are Slicer's, not the
+    page's, and a listener must be able to tell which is which.
+    """
+    if verbosity == Verbosity.OFF:
+        return ""
+
+    parts: list[str] = []
+    if block.kind == BlockKind.HEADING:
+        parts.append("heading,")
+    elif block.kind == BlockKind.TABLE_ROW:
+        if block.group_size:
+            parts.append(f"row {block.index_in_group} of {block.group_size},")
+        else:
+            parts.append("row,")
+    elif block.kind == BlockKind.LIST:
+        parts.append("list item,")
+
+    if verbosity == Verbosity.HIGH and index is not None and total:
+        parts.append(f"{index} of {total},")
+
+    return " ".join(parts)
 
 
 def assert_grounded(spoken: str, block: Block,

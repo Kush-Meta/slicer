@@ -9,7 +9,8 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 SUITES = ["test_slicer.py", "test_narrator.py", "test_conductor.py",
           "test_picker.py", "test_fingerprint.py", "test_continuity.py",
-          "test_overlay.py", "test_daemon.py", "test_golden.py"]
+          "test_overlay.py", "test_daemon.py", "test_reader.py",
+          "test_golden.py"]
 
 BOLD, DIM, GREEN, RED, RESET = "\033[1m", "\033[2m", "\033[32m", "\033[31m", "\033[0m"
 

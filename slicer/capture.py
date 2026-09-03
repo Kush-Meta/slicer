@@ -49,6 +49,9 @@ class Capture:
     # the origin is known, so the same region can be captured again after a
     # scroll and blocks can be mapped back onto the display.
     region: tuple[int, int, int, int] | None = None
+    # What Slicer says it is about to read - "Safari, Quarterly Review". For a
+    # non-visual user this is the only confirmation that it aimed correctly.
+    label: str = ""
 
     def recapture(self) -> "Capture":
         """Capture the same rectangle again."""
@@ -91,6 +94,43 @@ def capture_interactive() -> Capture:
     if region is None:
         raise CaptureError("selection cancelled")
     return capture_region(region.x, region.y, region.w, region.h)
+
+
+def capture_window(window=None, *, stability_check: bool = False) -> Capture:
+    """Capture a whole window, no selection required.
+
+    This is the primary aiming model for non-visual use: you say "read this
+    window" rather than drawing a rectangle around it.
+    """
+    from .windows import frontmost_window  # noqa: PLC0415
+
+    window = window or frontmost_window()
+    if window is None:
+        raise CaptureError(
+            "no window found to read",
+            remedy="Bring an application window to the front and try again.",
+        )
+    capture = capture_region(*window.region, stability_check=stability_check)
+    capture.label = window.label
+    return capture
+
+
+def capture_display(index: int = 0, *, stability_check: bool = False) -> Capture:
+    """Capture a whole display, for when the content spans windows."""
+    from AppKit import NSScreen  # noqa: PLC0415
+
+    screens = NSScreen.screens()
+    if not screens:
+        raise CaptureError("no display found")
+    screen = screens[min(index, len(screens) - 1)]
+    frame = screen.frame()
+    top = max(s.frame().origin.y + s.frame().size.height for s in screens)
+    x = int(frame.origin.x)
+    y = int(top - (frame.origin.y + frame.size.height))
+    capture = capture_region(x, y, int(frame.size.width), int(frame.size.height),
+                             stability_check=stability_check)
+    capture.label = "the screen"
+    return capture
 
 
 def capture_file(path: str) -> Capture:

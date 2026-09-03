@@ -39,6 +39,12 @@ def main(argv: list[str] | None = None) -> int:
         p.add_argument("--timings", action="store_true", help="print the stage breakdown")
         p.add_argument("--follow", action="store_true",
                        help="keep reading as the content scrolls")
+        p.add_argument("--window", action="store_true",
+                       help="read the frontmost window, no selection needed")
+        p.add_argument("--screen", action="store_true",
+                       help="read the whole display")
+        p.add_argument("--verbosity", choices=["off", "low", "high"], default="low",
+                       help="how much structure to announce (default: low)")
 
     daemon_parser = sub.add_parser("daemon", help="run the resident Slicer process")
     daemon_parser.add_argument("--voice")
@@ -80,14 +86,24 @@ def main(argv: list[str] | None = None) -> int:
     if forwarded is not None:
         return forwarded
 
+    from .editor import Verbosity  # noqa: PLC0415
     conductor = Conductor(
         narrator=Narrator(voice=getattr(args, "voice", None), rate=getattr(args, "rate", None)),
         layout_config=LayoutConfig(),
         fast_ocr=args.fast,
+        verbosity=Verbosity(args.verbosity),
     )
 
+    # Two screen readers talking at once is unusable, and the user cannot see a
+    # dialog to find out why. Say it plainly before anything else happens.
+    from .windows import voiceover_running  # noqa: PLC0415
+    if voiceover_running():
+        print(f"  {YELLOW}note{RESET} VoiceOver is running. Both will speak at once.\n"
+              f"       {DIM}Silence VoiceOver with control, or use --verbosity off.{RESET}")
+
     try:
-        source = capture_for(args.region, args.file)
+        source = capture_for(args.region, args.file,
+                             window=args.window, screen=args.screen)
     except CaptureError as exc:
         return _fail(exc)
 
@@ -267,7 +283,9 @@ def _stop() -> int:
 
 def _print_header(reading, args) -> None:
     blocks = len(reading.utterances)
-    print(f"\n{BOLD}{blocks} blocks, {reading.word_count} words{RESET}"
+    label = getattr(reading, "label", "") or ""
+    target = f"{label} \u00b7 " if label else ""
+    print(f"\n{BOLD}{target}{blocks} blocks, {reading.word_count} words{RESET}"
           f"  {DIM}to first word {reading.timings.to_first_word():.0f}ms{RESET}")
     for note in reading.notes:
         print(f"  {YELLOW}note{RESET} {note}")

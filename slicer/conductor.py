@@ -19,7 +19,7 @@ from .blocks import Block, Slice
 from .capture import Capture, CaptureError
 from .continuity import Scroller
 from .fingerprint import ReadingMemory
-from .editor import UngroundedSpeech, Utterance, to_speech
+from .editor import UngroundedSpeech, Utterance, Verbosity, to_speech
 from .layout import LayoutConfig, build_slice
 from .narrator import Narrator
 from .ocr import OcrError, recognize
@@ -37,6 +37,9 @@ class Reading:
     timings: telemetry.Timings
     notes: list[str] = field(default_factory=list)
     dropped: int = 0
+    # What Slicer says it aimed at, e.g. "Safari, Quarterly Review". The only
+    # confirmation a non-visual user gets that it targeted the right thing.
+    label: str = ""
 
     @property
     def word_count(self) -> int:
@@ -46,10 +49,12 @@ class Reading:
 class Conductor:
     def __init__(self, narrator: Narrator | None = None,
                  layout_config: LayoutConfig | None = None,
-                 *, fast_ocr: bool = False):
+                 *, fast_ocr: bool = False,
+                 verbosity: Verbosity = Verbosity.LOW):
         self.narrator = narrator or Narrator()
         self.layout_config = layout_config or LayoutConfig()
         self.fast_ocr = fast_ocr
+        self.verbosity = verbosity
 
     # -- pipeline ----------------------------------------------------------
 
@@ -90,17 +95,21 @@ class Conductor:
             notes.append(f"{skipped} block(s) classified as navigation")
 
         return Reading(slice=slice_, utterances=utterances, timings=timings,
-                       notes=notes, dropped=dropped)
+                       notes=notes, dropped=dropped,
+                       label=getattr(source, "label", ""))
 
     def _render(self, slice_: Slice) -> tuple[list[Utterance], int]:
         utterances: list[Utterance] = []
         dropped = 0
-        for block in slice_.readable():
+        readable = slice_.readable()
+        for position, block in enumerate(readable, 1):
             if block.confidence < MIN_CONFIDENCE:
                 dropped += 1
                 continue
             try:
-                utterance = to_speech(block, min_confidence=LOW_CONFIDENCE)
+                utterance = to_speech(block, min_confidence=LOW_CONFIDENCE,
+                                      verbosity=self.verbosity,
+                                      index=position, total=len(readable))
             except UngroundedSpeech as exc:
                 # The invariant held and something tried to speak an invented
                 # word. Drop the block rather than the guarantee.
@@ -219,10 +228,20 @@ class Conductor:
         return spoken
 
 
-def capture_for(region: str | None, file: str | None) -> Capture:
-    """Resolve the three ways a reading can be aimed."""
+def capture_for(region: str | None, file: str | None, *,
+                window: bool = False, screen: bool = False) -> Capture:
+    """Resolve the ways a reading can be aimed.
+
+    Window and screen targets exist so the tool can be aimed without sight.
+    Dragging a rectangle assumes you can see where the content is and confirm
+    the selection landed on it; naming a target assumes neither.
+    """
     if file:
         return capture_mod.capture_file(file)
+    if window:
+        return capture_mod.capture_window()
+    if screen:
+        return capture_mod.capture_display()
     if region:
         try:
             x, y, w, h = (int(part) for part in region.split(","))
